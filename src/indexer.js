@@ -1,28 +1,29 @@
 import dotenv from "dotenv";
-import { getDb } from "./db.js";
-import { iterateMessages } from "./telegram.js";
+
+import {
+  getDb,
+  getState,
+  setState
+} from "./db.js";
+
+import {
+  iterateMessages
+} from "./telegram.js";
 
 dotenv.config();
 
 function getDocument(message) {
-  const media = message?.media;
+  const media =
+    message?.media;
 
   if (!media) {
     return null;
   }
 
-  // GramJS MessageMediaDocument
   if (
     media.document &&
-    media.document.className === "Document"
-  ) {
-    return media.document;
-  }
-
-  // Fallback: document object exists
-  if (
-    media.document &&
-    typeof media.document === "object"
+    typeof media.document ===
+      "object"
   ) {
     return media.document;
   }
@@ -30,7 +31,9 @@ function getDocument(message) {
   return null;
 }
 
-function getFilename(document) {
+function getFilename(
+  document
+) {
   const attributes =
     document?.attributes || [];
 
@@ -39,14 +42,18 @@ function getFilename(document) {
       attr?.className ===
       "DocumentAttributeFilename"
     ) {
-      return attr.fileName || "";
+      return (
+        attr.fileName || ""
+      );
     }
   }
 
   return "";
 }
 
-function getVideoDimensions(document) {
+function getDimensions(
+  document
+) {
   const attributes =
     document?.attributes || [];
 
@@ -57,10 +64,12 @@ function getVideoDimensions(document) {
     ) {
       return {
         width:
-          Number(attr.w || 0) || null,
+          Number(attr.w || 0) ||
+          null,
 
         height:
-          Number(attr.h || 0) || null
+          Number(attr.h || 0) ||
+          null
       };
     }
   }
@@ -91,13 +100,17 @@ function getTitle(
       .slice(0, 300);
   }
 
-  return `Telegram ${message?.id || "Unknown"}`;
+  return `Telegram ${message.id}`;
 }
 
 function getType(title) {
   if (
-    /s\d{1,2}e\d{1,2}/i.test(title) ||
-    /season|episode|series/i.test(title)
+    /s\d{1,2}e\d{1,2}/i.test(
+      title
+    ) ||
+    /season|episode|series/i.test(
+      title
+    )
   ) {
     return "series";
   }
@@ -119,14 +132,17 @@ function getYear(title) {
 function getCreatedAt(message) {
   try {
     if (
-      message?.date instanceof Date
+      message?.date instanceof
+      Date
     ) {
-      return message.date.toISOString();
+      return message.date
+        .toISOString();
     }
 
     if (message?.date) {
       return new Date(
-        Number(message.date) * 1000
+        Number(message.date) *
+          1000
       ).toISOString();
     }
   } catch {
@@ -137,18 +153,53 @@ function getCreatedAt(message) {
 }
 
 export async function indexTelegram() {
-  const db = getDb();
+  const db =
+    getDb();
+
+  const storedLastId =
+    Number(
+      getState(
+        "last_message_id"
+      ) || 0
+    );
 
   console.log(
-    "Starting Telegram indexing..."
+    `Last indexed Telegram message ID: ${storedLastId}`
   );
+
+  /*
+    First run:
+    read up to 10000 messages.
+
+    Later runs:
+    only read messages newer
+    than last indexed ID.
+  */
+
+  const limit =
+    storedLastId > 0
+      ? 1000
+      : 10000;
 
   const messages =
-    await iterateMessages(10000);
+    await iterateMessages(
+      limit,
+      storedLastId
+    );
 
   console.log(
-    `Telegram media messages found: ${messages.length}`
+    `Messages returned for indexing: ${messages.length}`
   );
+
+  if (
+    messages.length === 0
+  ) {
+    console.log(
+      "No new Telegram media found."
+    );
+
+    return;
+  }
 
   const insert =
     db.prepare(`
@@ -198,101 +249,147 @@ export async function indexTelegram() {
   let indexed = 0;
   let skipped = 0;
 
-  const run =
-    db.transaction((rows) => {
-      for (const message of rows) {
-        try {
-          const document =
-            getDocument(message);
+  let highestMessageId =
+    storedLastId;
 
-          if (!document) {
-            skipped++;
+  const run =
+    db.transaction(
+      (rows) => {
+
+        for (
+          const message of rows
+        ) {
+          try {
+            const messageId =
+              Number(
+                message.id
+              );
+
+            if (
+              messageId >
+              highestMessageId
+            ) {
+              highestMessageId =
+                messageId;
+            }
+
+            const document =
+              getDocument(
+                message
+              );
+
+            if (!document) {
+              skipped++;
+
+              continue;
+            }
+
+            const filename =
+              getFilename(
+                document
+              );
+
+            const dimensions =
+              getDimensions(
+                document
+              );
+
+            const title =
+              getTitle(
+                message,
+                filename
+              );
+
+            const type =
+              getType(title);
+
+            const year =
+              getYear(title);
+
+            const caption =
+              message.message ||
+              "";
+
+            const mime =
+              document.mimeType ||
+              "video/mp4";
+
+            const size =
+              Number(
+                document.size || 0
+              );
+
+            insert.run({
+              message_id:
+                messageId,
+
+              title,
+
+              year,
+
+              type,
+
+              filename,
+
+              mime,
+
+              size,
+
+              width:
+                dimensions.width,
+
+              height:
+                dimensions.height,
+
+              caption,
+
+              created_at:
+                getCreatedAt(
+                  message
+                ),
+
+              indexed_at:
+                new Date()
+                  .toISOString()
+            });
+
+            indexed++;
 
             console.log(
-              `Skipped message ${message?.id}: no document`
+              `Indexed: ${title}`
             );
 
-            continue;
+          } catch (error) {
+            skipped++;
+
+            console.error(
+              `Failed to index message ${
+                message?.id
+              }:`,
+              error.message
+            );
           }
-
-          const filename =
-            getFilename(document);
-
-          const dimensions =
-            getVideoDimensions(
-              document
-            );
-
-          const title =
-            getTitle(
-              message,
-              filename
-            );
-
-          const type =
-            getType(title);
-
-          const year =
-            getYear(title);
-
-          const caption =
-            message?.message || "";
-
-          const mime =
-            document?.mimeType ||
-            "video/mp4";
-
-          const size =
-            Number(
-              document?.size || 0
-            );
-
-          insert.run({
-            message_id:
-              Number(message.id),
-
-            title,
-
-            year,
-
-            type,
-
-            filename,
-
-            mime,
-
-            size,
-
-            width:
-              dimensions.width,
-
-            height:
-              dimensions.height,
-
-            caption,
-
-            created_at:
-              getCreatedAt(message),
-
-            indexed_at:
-              new Date().toISOString()
-          });
-
-          indexed++;
-
-          console.log(
-            `Indexed ${indexed}: ${title}`
-          );
-        } catch (error) {
-          console.error(
-            `Failed to index message ${message?.id}:`,
-            error.message
-          );
         }
       }
-    });
+    );
 
   run(messages);
+
+  /*
+    Save highest Telegram
+    message ID only after
+    successful transaction.
+  */
+
+  if (
+    highestMessageId >
+    storedLastId
+  ) {
+    setState(
+      "last_message_id",
+      highestMessageId
+    );
+  }
 
   const result =
     db
@@ -302,15 +399,19 @@ export async function indexTelegram() {
       .get();
 
   console.log(
-    `Indexing complete. Database contains ${result.count} media items.`
-  );
-
-  console.log(
     `Indexed this run: ${indexed}`
   );
 
   console.log(
     `Skipped this run: ${skipped}`
+  );
+
+  console.log(
+    `Database contains ${result.count} media items`
+  );
+
+  console.log(
+    `Last indexed message ID: ${highestMessageId}`
   );
 
   return result.count;
