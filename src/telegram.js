@@ -1,5 +1,6 @@
 import dotenv from "dotenv";
 import { TelegramClient, Api } from "telegram";
+
 import {
   StringSession
 } from "telegram/sessions/index.js";
@@ -11,6 +12,10 @@ import {
 import bigInt from "big-integer";
 
 dotenv.config();
+
+/* -------------------------------------------------
+   TELEGRAM CONFIG
+------------------------------------------------- */
 
 const apiId =
   Number(
@@ -25,11 +30,17 @@ const session =
     process.env.TELEGRAM_SESSION || ""
   );
 
+/* -------------------------------------------------
+   CLIENT
+------------------------------------------------- */
+
 let client = null;
-let updateHandlerStarted = false;
+
+let updateHandlerStarted =
+  false;
 
 /* -------------------------------------------------
-   GET TELEGRAM CLIENT
+   GET CLIENT
 ------------------------------------------------- */
 
 export async function getClient() {
@@ -53,6 +64,11 @@ export async function getClient() {
     "Telegram connected"
   );
 
+  /*
+    Start realtime listener after
+    successful Telegram connection.
+  */
+
   await startRealtimeListener();
 
   return client;
@@ -72,7 +88,7 @@ export async function getChannel() {
 }
 
 /* -------------------------------------------------
-   GET MESSAGE
+   GET SINGLE MESSAGE
 ------------------------------------------------- */
 
 export async function getMessage(
@@ -100,7 +116,7 @@ export async function getMessage(
 }
 
 /* -------------------------------------------------
-   READ TELEGRAM MESSAGES
+   ITERATE TELEGRAM MESSAGES
 ------------------------------------------------- */
 
 export async function iterateMessages(
@@ -122,6 +138,12 @@ export async function iterateMessages(
   const options = {
     limit
   };
+
+  /*
+    Incremental indexing:
+    only read messages newer than
+    the last indexed message ID.
+  */
 
   if (
     Number(minId) > 0
@@ -145,8 +167,17 @@ export async function iterateMessages(
         Number(msg.id);
 
       if (!messageId) {
+        console.log(
+          "Skipping message without ID"
+        );
+
         continue;
       }
+
+      /*
+        Only media messages are useful
+        for our Nuvio library.
+      */
 
       if (!msg.media) {
         continue;
@@ -176,7 +207,7 @@ export async function iterateMessages(
 }
 
 /* -------------------------------------------------
-   DOCUMENT FROM MESSAGE
+   GET DOCUMENT FROM MESSAGE
 ------------------------------------------------- */
 
 function getDocumentFromMessage(
@@ -190,6 +221,10 @@ function getDocumentFromMessage(
       "Telegram message has no media"
     );
   }
+
+  /*
+    Normal Telegram document.
+  */
 
   if (
     media instanceof
@@ -206,6 +241,10 @@ function getDocumentFromMessage(
     }
   }
 
+  /*
+    Fallback for GramJS object structure.
+  */
+
   if (
     media.document &&
     media.document instanceof
@@ -213,6 +252,10 @@ function getDocumentFromMessage(
   ) {
     return media.document;
   }
+
+  /*
+    Generic document object fallback.
+  */
 
   if (
     media.document &&
@@ -231,7 +274,7 @@ function getDocumentFromMessage(
 }
 
 /* -------------------------------------------------
-   STREAM TELEGRAM FILE
+   STREAM TELEGRAM MESSAGE
 ------------------------------------------------- */
 
 export async function streamMessage(
@@ -258,6 +301,11 @@ export async function streamMessage(
     );
   }
 
+  /*
+    Telegram file downloads need
+    aligned offsets.
+  */
+
   const requestSize =
     512 * 1024;
 
@@ -282,6 +330,10 @@ export async function streamMessage(
       totalBytes /
         requestSize
     );
+
+  /*
+    Telegram document location.
+  */
 
   const location =
     new Api.InputDocumentFileLocation({
@@ -312,6 +364,12 @@ export async function streamMessage(
     `Chunks: ${chunks}`
   );
 
+  /*
+    IMPORTANT:
+    GramJS expects big-integer
+    for the offset.
+  */
+
   const iterator =
     c.iterDownload({
       file: location,
@@ -321,7 +379,8 @@ export async function streamMessage(
           alignedStart
         ),
 
-      limit: chunks,
+      limit:
+        chunks,
 
       requestSize,
 
@@ -334,12 +393,23 @@ export async function streamMessage(
   let remaining =
     bytesNeeded;
 
+  /*
+    Return async generator so
+    server.js can stream chunks
+    directly to Nuvio.
+  */
+
   return (async function* () {
     for await (
       const chunk of iterator
     ) {
       let data =
         Buffer.from(chunk);
+
+      /*
+        Remove bytes before the
+        requested HTTP range.
+      */
 
       if (
         skipped < skip
@@ -358,6 +428,11 @@ export async function streamMessage(
         skipped +=
           remove;
       }
+
+      /*
+        Never send more bytes than
+        requested by the HTTP range.
+      */
 
       if (
         data.length >
@@ -393,23 +468,62 @@ export async function streamMessage(
 ------------------------------------------------- */
 
 async function startRealtimeListener() {
-  if (updateHandlerStarted) {
+  /*
+    Prevent duplicate listeners.
+  */
+
+  if (
+    updateHandlerStarted
+  ) {
     return;
   }
 
-  updateHandlerStarted = true;
+  updateHandlerStarted =
+    true;
 
   const c =
     client;
+
+  /*
+    Resolve configured channel once.
+  */
 
   const channel =
     await c.getEntity(
       process.env.TELEGRAM_CHANNEL
     );
 
+  const channelId =
+    String(
+      channel.id
+    );
+
+  console.log(
+    `Realtime listener target channel: ${channelId}`
+  );
+
   console.log(
     "Starting Telegram realtime listener..."
   );
+
+  /*
+    IMPORTANT:
+
+    Do NOT use:
+
+      new NewMessage({
+        chats: [channel]
+      })
+
+    because GramJS may try to resolve
+    the channel object again and produce:
+
+      [object Object]
+
+    Instead we listen for NewMessage
+    events globally and manually filter
+    by channel ID below.
+  */
 
   c.addEventHandler(
     async (event) => {
@@ -422,41 +536,43 @@ async function startRealtimeListener() {
         }
 
         const messageId =
-          Number(message.id);
+          Number(
+            message.id
+          );
 
         if (!messageId) {
           return;
         }
 
         /*
-          Make sure the update belongs
-          to our configured Telegram channel.
+          Get incoming message peer.
         */
 
         const peerId =
-          message?.peerId;
+          message.peerId;
 
-        let sameChannel =
-          false;
+        const incomingChannelId =
+          peerId?.channelId
+            ? String(
+                peerId.channelId
+              )
+            : null;
+
+        /*
+          Ignore messages that aren't
+          from our configured channel.
+        */
 
         if (
-          peerId?.channelId
+          !incomingChannelId ||
+          incomingChannelId !==
+            channelId
         ) {
-          sameChannel =
-            String(
-              peerId.channelId
-            ) ===
-            String(
-              channel.id
-            );
-        }
-
-        if (!sameChannel) {
           return;
         }
 
         /*
-          Ignore messages without media.
+          Ignore text-only messages.
         */
 
         if (!message.media) {
@@ -468,8 +584,11 @@ async function startRealtimeListener() {
         );
 
         /*
-          Import here to avoid circular
-          module initialization problems.
+          Dynamically import indexer.
+
+          This avoids a circular module
+          initialization problem between
+          telegram.js and indexer.js.
         */
 
         const {
@@ -477,6 +596,10 @@ async function startRealtimeListener() {
         } = await import(
           "./indexer.js"
         );
+
+        /*
+          Index only this new message.
+        */
 
         await indexSingleMessage(
           message
@@ -493,11 +616,14 @@ async function startRealtimeListener() {
       }
     },
 
-    new NewMessage({
-      chats: [
-        channel
-      ]
-    })
+    /*
+      Empty NewMessage filter.
+
+      We manually filter the configured
+      channel above.
+    */
+
+    new NewMessage({})
   );
 
   console.log(
