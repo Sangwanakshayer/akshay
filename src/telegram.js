@@ -2,34 +2,30 @@ import dotenv from "dotenv";
 import { TelegramClient, Api } from "telegram";
 import { StringSession } from "telegram/sessions/index.js";
 import bigInt from "big-integer";
-import fs from "fs/promises";
-import path from "path";
 
 dotenv.config();
 
-const apiId = Number(process.env.TELEGRAM_API_ID);
-const apiHash = process.env.TELEGRAM_API_HASH;
-
-const session = new StringSession(
-  process.env.TELEGRAM_SESSION || ""
+const apiId = Number(
+  process.env.TELEGRAM_API_ID
 );
+
+const apiHash =
+  process.env.TELEGRAM_API_HASH;
+
+const session =
+  new StringSession(
+    process.env.TELEGRAM_SESSION || ""
+  );
 
 let client = null;
 
-
-/* =========================================================
+/* ---------------------------------------------
    TELEGRAM CLIENT
-========================================================= */
+--------------------------------------------- */
 
 export async function getClient() {
   if (client) {
     return client;
-  }
-
-  if (!apiId || !apiHash) {
-    throw new Error(
-      "TELEGRAM_API_ID and TELEGRAM_API_HASH are required"
-    );
   }
 
   client = new TelegramClient(
@@ -37,125 +33,140 @@ export async function getClient() {
     apiId,
     apiHash,
     {
-      connectionRetries: 5
+      connectionRetries: 3
     }
   );
 
   await client.connect();
 
-  console.log("Telegram connected");
+  console.log(
+    "Telegram connected"
+  );
 
   return client;
 }
 
-
-/* =========================================================
-   GET CHANNEL
-========================================================= */
+/* ---------------------------------------------
+   CHANNEL
+--------------------------------------------- */
 
 export async function getChannel() {
-  const c = await getClient();
+  const c =
+    await getClient();
+
+  return await c.getEntity(
+    process.env.TELEGRAM_CHANNEL
+  );
+}
+
+/* ---------------------------------------------
+   GET SINGLE MESSAGE
+--------------------------------------------- */
+
+export async function getMessage(
+  messageId
+) {
+  const c =
+    await getClient();
 
   const channel =
-    process.env.TELEGRAM_CHANNEL || "Happy";
+    await getChannel();
 
-  return await c.getEntity(channel);
-}
-
-
-/* =========================================================
-   GET MESSAGE
-========================================================= */
-
-export async function getMessage(messageId) {
-  const c = await getClient();
-  const channel = await getChannel();
-
-  const messages = await c.getMessages(
-    channel,
-    {
-      ids: [Number(messageId)]
-    }
-  );
-
-  const message = messages?.[0];
-
-  if (!message) {
-    throw new Error(
-      `Telegram message ${messageId} not found`
+  const messages =
+    await c.getMessages(
+      channel,
+      {
+        ids: [
+          Number(messageId)
+        ]
+      }
     );
-  }
 
-  return message;
+  return (
+    messages?.[0] || null
+  );
 }
 
+/* ---------------------------------------------
+   ITERATE TELEGRAM MEDIA
+--------------------------------------------- */
 
-/* =========================================================
-   INDEX TELEGRAM MEDIA
-========================================================= */
+export async function iterateMessages(
+  limit = 10000
+) {
+  const c =
+    await getClient();
 
-export async function iterateMessages(limit = 1000) {
-  const c = await getClient();
-  const channel = await getChannel();
+  const channel =
+    await getChannel();
 
-  const rows = [];
+  const result = [];
+
+  console.log(
+    `Reading Telegram messages, limit: ${limit}`
+  );
 
   for await (
     const msg of c.iterMessages(
       channel,
-      { limit }
+      {
+        limit
+      }
     )
   ) {
-    if (!msg.media) {
-      continue;
-    }
-
-    let filename = "";
-    let mime = "";
-    let size = 0;
-
     try {
-      const file = msg.file;
-
-      if (file) {
-        try {
-          filename = file.name || "";
-        } catch {}
-
-        try {
-          mime = file.mimeType || "";
-        } catch {}
-
-        try {
-          size = Number(file.size || 0);
-        } catch {}
+      if (!msg) {
+        continue;
       }
-    } catch {}
 
-    rows.push({
-      messageId: msg.id,
-      filename,
-      mime,
-      size,
-      width: null,
-      height: null,
-      caption: msg.message || "",
-      date: msg.date
-        ? new Date(msg.date).toISOString()
-        : null
-    });
+      const messageId =
+        Number(msg.id);
+
+      if (!messageId) {
+        console.log(
+          "Skipping message without ID"
+        );
+
+        continue;
+      }
+
+      if (!msg.media) {
+        continue;
+      }
+
+      console.log(
+        `Found media message: ${messageId} | ${
+          msg.media.className ||
+          "unknown"
+        }`
+      );
+
+      result.push(msg);
+
+    } catch (error) {
+      console.error(
+        "Error reading Telegram message:",
+        error.message
+      );
+    }
   }
 
-  return rows;
+  console.log(
+    `Collected ${result.length} Telegram media messages`
+  );
+
+  return result;
 }
 
+/* ---------------------------------------------
+   GET TELEGRAM DOCUMENT
+--------------------------------------------- */
 
-/* =========================================================
-   GET DOCUMENT FROM TELEGRAM MESSAGE
-========================================================= */
-
-function getDocumentFromMessage(message) {
-  const media = message?.media;
+function getDocumentFromMessage(
+  message
+) {
+  const media =
+    message?.media;
 
   if (!media) {
     throw new Error(
@@ -163,58 +174,70 @@ function getDocumentFromMessage(message) {
     );
   }
 
-  /*
-   * Normal uploaded Telegram file
-   */
-
   if (
-    media instanceof Api.MessageMediaDocument
+    media instanceof
+    Api.MessageMediaDocument
   ) {
     const document =
       media.document;
 
     if (
-      document instanceof Api.Document
+      document instanceof
+      Api.Document
     ) {
       return document;
     }
   }
 
+  if (
+    media.document &&
+    media.document instanceof
+      Api.Document
+  ) {
+    return media.document;
+  }
+
   /*
-   * Fallback
-   */
+    Fallback for GramJS objects
+  */
 
   if (
     media.document &&
-    media.document instanceof Api.Document
+    typeof media.document ===
+      "object"
   ) {
     return media.document;
   }
 
   throw new Error(
     `Unsupported Telegram media type: ${
-      media.className || "unknown"
+      media.className ||
+      "unknown"
     }`
   );
 }
 
-
-/* =========================================================
+/* ---------------------------------------------
    STREAM TELEGRAM FILE
-========================================================= */
+--------------------------------------------- */
 
 export async function streamMessage(
   message,
   start = 0,
   end = null
 ) {
-  const c = await getClient();
+  const c =
+    await getClient();
 
   const document =
-    getDocumentFromMessage(message);
+    getDocumentFromMessage(
+      message
+    );
 
   const fileSize =
-    Number(document.size || 0);
+    Number(
+      document.size || 0
+    );
 
   if (!fileSize) {
     throw new Error(
@@ -222,12 +245,17 @@ export async function streamMessage(
     );
   }
 
+  const requestSize =
+    512 * 1024;
+
   /*
-   * Telegram requires aligned offsets.
-   */
+    Telegram requires aligned offsets.
+  */
 
   const alignedStart =
-    Math.floor(start / 4096) * 4096;
+    Math.floor(
+      start / 4096
+    ) * 4096;
 
   const skip =
     start - alignedStart;
@@ -237,30 +265,19 @@ export async function streamMessage(
       ? fileSize - start
       : end - start + 1;
 
-  const requestSize =
-    512 * 1024;
-
   const totalBytes =
     skip + bytesNeeded;
 
-  /*
-   * iterDownload limit = number of chunks,
-   * NOT number of bytes.
-   */
-
   const chunks =
     Math.ceil(
-      totalBytes / requestSize
+      totalBytes /
+        requestSize
     );
-
-  /*
-   * Create proper Telegram
-   * InputDocumentFileLocation.
-   */
 
   const location =
     new Api.InputDocumentFileLocation({
-      id: document.id,
+      id:
+        document.id,
 
       accessHash:
         document.accessHash,
@@ -272,7 +289,10 @@ export async function streamMessage(
     });
 
   console.log(
-    `Telegram stream: ${start}-${end ?? fileSize - 1} / ${fileSize}`
+    `Telegram stream: ${start}-${
+      end ??
+      fileSize - 1
+    } / ${fileSize}`
   );
 
   console.log(
@@ -283,23 +303,22 @@ export async function streamMessage(
     `Chunks: ${chunks}`
   );
 
-  /*
-   * IMPORTANT:
-   * offset must be BigInteger.
-   */
-
   const iterator =
     c.iterDownload({
       file: location,
 
       offset:
-        bigInt(alignedStart),
+        bigInt(
+          alignedStart
+        ),
 
-      limit: chunks,
+      limit:
+        chunks,
 
       requestSize,
 
-      chunkSize: requestSize
+      chunkSize:
+        requestSize
     });
 
   let skipped = 0;
@@ -313,14 +332,18 @@ export async function streamMessage(
       const chunk of iterator
     ) {
       let data =
-        Buffer.from(chunk);
+        Buffer.from(
+          chunk
+        );
 
       /*
-       * Remove bytes before
-       * requested HTTP Range.
-       */
+        Remove bytes before
+        requested range.
+      */
 
-      if (skipped < skip) {
+      if (
+        skipped < skip
+      ) {
         const remove =
           Math.min(
             skip - skipped,
@@ -328,15 +351,18 @@ export async function streamMessage(
           );
 
         data =
-          data.subarray(remove);
+          data.subarray(
+            remove
+          );
 
-        skipped += remove;
+        skipped +=
+          remove;
       }
 
       /*
-       * Don't send more than
-       * requested.
-       */
+        Don't send more than
+        requested bytes.
+      */
 
       if (
         data.length >
@@ -349,7 +375,9 @@ export async function streamMessage(
           );
       }
 
-      if (data.length > 0) {
+      if (
+        data.length > 0
+      ) {
         yield data;
 
         remaining -=
@@ -364,64 +392,4 @@ export async function streamMessage(
     }
 
   })();
-}
-
-
-/* =========================================================
-   FULL DOWNLOAD HELPER
-========================================================= */
-
-export async function downloadMessageToTemp(
-  messageId
-) {
-  const c = await getClient();
-  const channel = await getChannel();
-
-  const messages =
-    await c.getMessages(
-      channel,
-      {
-        ids: [
-          Number(messageId)
-        ]
-      }
-    );
-
-  const message =
-    messages?.[0];
-
-  if (!message) {
-    throw new Error(
-      "Telegram message not found"
-    );
-  }
-
-  const dir =
-    path.join(
-      process.cwd(),
-      "data",
-      "tmp"
-    );
-
-  await fs.mkdir(
-    dir,
-    {
-      recursive: true
-    }
-  );
-
-  const out =
-    path.join(
-      dir,
-      `${messageId}.bin`
-    );
-
-  await c.downloadMedia(
-    message,
-    {
-      outputFile: out
-    }
-  );
-
-  return out;
 }
