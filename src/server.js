@@ -1,14 +1,14 @@
 import express from "express";
 import dotenv from "dotenv";
 
+import { getDb } from "./db.js";
+
 import {
   getMessage,
   streamMessage
 } from "./telegram.js";
 
-import {
-  getDb
-} from "./db.js";
+import { indexTelegram } from "./indexer.js";
 
 dotenv.config();
 
@@ -17,14 +17,9 @@ const app = express();
 const PORT =
   Number(process.env.PORT) || 7000;
 
-const BASE_URL =
-  process.env.PUBLIC_BASE_URL ||
-  `http://localhost:${PORT}`;
-
-
-/* =========================================================
+/* -------------------------------------------------
    CORS
-========================================================= */
+------------------------------------------------- */
 
 app.use((req, res, next) => {
   res.setHeader(
@@ -37,32 +32,169 @@ app.use((req, res, next) => {
     "*"
   );
 
-  res.setHeader(
-    "Access-Control-Allow-Methods",
-    "GET, HEAD, OPTIONS"
-  );
-
   next();
 });
 
+/* -------------------------------------------------
+   BASE URL
+------------------------------------------------- */
 
-/* =========================================================
+function getBaseUrl(req) {
+  return (
+    process.env.PUBLIC_BASE_URL ||
+    `${req.protocol}://${req.get("host")}`
+  );
+}
+
+/* -------------------------------------------------
+   DATABASE
+------------------------------------------------- */
+
+function getMediaById(id) {
+  const db = getDb();
+
+  return db
+    .prepare(
+      "SELECT * FROM media WHERE id = ?"
+    )
+    .get(Number(id));
+}
+
+/* -------------------------------------------------
+   META
+------------------------------------------------- */
+
+function makeMeta(row, req) {
+  const baseUrl =
+    getBaseUrl(req);
+
+  return {
+    id: `tg:${row.id}`,
+
+    type:
+      row.type === "series"
+        ? "series"
+        : "movie",
+
+    name:
+      row.title ||
+      row.filename ||
+      `Telegram ${row.message_id}`,
+
+    description:
+      row.caption || "",
+
+    year:
+      row.year || undefined,
+
+    streams: [
+      {
+        title: "Play",
+
+        url:
+          `${baseUrl}/stream/${row.type}/tg:${row.id}.json`
+      }
+    ]
+  };
+}
+
+/* -------------------------------------------------
+   EXTRA PARSER
+------------------------------------------------- */
+
+function parseExtra(value) {
+  if (!value) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(value);
+  } catch {
+    return {};
+  }
+}
+
+/* -------------------------------------------------
+   CATALOG
+------------------------------------------------- */
+
+function getCatalogRows(
+  type,
+  search = "",
+  skip = 0
+) {
+  const db = getDb();
+
+  const safeType =
+    type === "series"
+      ? "series"
+      : "movie";
+
+  const offset =
+    Math.max(
+      0,
+      Number(skip) || 0
+    );
+
+  if (search) {
+    const q =
+      `%${search}%`;
+
+    return db
+      .prepare(`
+        SELECT *
+        FROM media
+        WHERE type = ?
+        AND (
+          title LIKE ?
+          OR filename LIKE ?
+          OR caption LIKE ?
+        )
+        ORDER BY id DESC
+        LIMIT 100
+        OFFSET ?
+      `)
+      .all(
+        safeType,
+        q,
+        q,
+        q,
+        offset
+      );
+  }
+
+  return db
+    .prepare(`
+      SELECT *
+      FROM media
+      WHERE type = ?
+      ORDER BY id DESC
+      LIMIT 100
+      OFFSET ?
+    `)
+    .all(
+      safeType,
+      offset
+    );
+}
+
+/* -------------------------------------------------
    HEALTH
-========================================================= */
+------------------------------------------------- */
 
 app.get("/", (req, res) => {
   res.json({
     ok: true,
-    name: "Happy Telegram Media Addon",
+    name:
+      "Happy Telegram Media Addon",
     status: "running",
     version: "1.0.0"
   });
 });
 
-
-/* =========================================================
+/* -------------------------------------------------
    MANIFEST
-========================================================= */
+------------------------------------------------- */
 
 app.get(
   "/manifest.json",
@@ -76,381 +208,176 @@ app.get(
   }
 );
 
-
-/* =========================================================
-   DATABASE HELPER
-========================================================= */
-
-function getMediaById(id) {
-  const db = getDb();
-
-  return db
-    .prepare(
-      `
-      SELECT *
-      FROM media
-      WHERE id = ?
-      LIMIT 1
-      `
-    )
-    .get(id);
-}
-
-
-/* =========================================================
-   BUILD META
-========================================================= */
-
-function makeMeta(row) {
-  return {
-    id: `tg:${row.id}`,
-
-    type:
-      row.type || "movie",
-
-    name:
-      row.title ||
-      row.filename ||
-      `Telegram ${row.message_id}`,
-
-    description:
-      row.caption || "",
-
-    releaseInfo:
-      row.year
-        ? String(row.year)
-        : undefined,
-
-    poster:
-      row.thumb
-        ? `${BASE_URL}/thumb/${row.id}`
-        : undefined,
-
-    background:
-      row.thumb
-        ? `${BASE_URL}/thumb/${row.id}`
-        : undefined,
-
-    genres: [],
-
-    videos: []
-  };
-}
-
-
-/* =========================================================
-   SEARCH / CATALOG HELPERS
-========================================================= */
-
-function parseExtra(extra) {
-  if (!extra) {
-    return {};
-  }
-
-  try {
-    const params =
-      new URLSearchParams(
-        extra
-      );
-
-    return {
-      search:
-        params.get("search") || "",
-
-      skip:
-        Number(
-          params.get("skip") || 0
-        )
-    };
-
-  } catch {
-    return {};
-  }
-}
-
-
-function getCatalogRows(
-  type,
-  search = "",
-  skip = 0
-) {
-  const db = getDb();
-
-  const cleanSearch =
-    String(search || "").trim();
-
-  let rows;
-
-  if (cleanSearch) {
-
-    const pattern =
-      `%${cleanSearch}%`;
-
-    rows =
-      db
-        .prepare(
-          `
-          SELECT *
-          FROM media
-          WHERE type = ?
-          AND (
-            title LIKE ?
-            OR filename LIKE ?
-            OR caption LIKE ?
-          )
-          ORDER BY indexed_at DESC
-          LIMIT 100
-          OFFSET ?
-          `
-        )
-        .all(
-          type,
-          pattern,
-          pattern,
-          pattern,
-          skip
-        );
-
-  } else {
-
-    rows =
-      db
-        .prepare(
-          `
-          SELECT *
-          FROM media
-          WHERE type = ?
-          ORDER BY indexed_at DESC
-          LIMIT 100
-          OFFSET ?
-          `
-        )
-        .all(
-          type,
-          skip
-        );
-  }
-
-  return rows;
-}
-
-
-/* =========================================================
-   CATALOG
-========================================================= */
-
-/*
-   Normal:
-
-   /catalog/movie/happy-movies.json
-
-   Search:
-
-   /catalog/movie/happy-movies/search=abc.json
-*/
-
-app.get(
-  "/catalog/:type/:id.json",
-  (req, res) => {
-
-    handleCatalog(
-      req,
-      res,
-      null
-    );
-  }
-);
-
+/* -------------------------------------------------
+   CATALOG WITH EXTRA
+------------------------------------------------- */
 
 app.get(
   "/catalog/:type/:id/:extra.json",
   (req, res) => {
-
-    handleCatalog(
-      req,
-      res,
-      req.params.extra
-    );
-  }
-);
-
-
-function handleCatalog(
-  req,
-  res,
-  extra
-) {
-  try {
-
-    const type =
-      req.params.type;
-
-    /*
-     * Search may arrive either:
-     *
-     * /catalog/.../search=abc.json
-     *
-     * or as query parameter.
-     */
-
-    const parsed =
-      parseExtra(extra);
-
-    const search =
-      parsed.search ||
-      req.query.search ||
-      "";
-
-    const skip =
-      parsed.skip ||
-      Number(
-        req.query.skip || 0
-      );
-
-    const rows =
-      getCatalogRows(
-        type,
-        search,
-        skip
-      );
-
-    const metas =
-      rows.map(
-        (row) => ({
-          id: `tg:${row.id}`,
-
-          type:
-            row.type || type,
-
-          name:
-            row.title ||
-            row.filename ||
-            `Telegram ${row.message_id}`,
-
-          description:
-            row.caption || "",
-
-          releaseInfo:
-            row.year
-              ? String(row.year)
-              : undefined,
-
-          poster:
-            row.thumb
-              ? `${BASE_URL}/thumb/${row.id}`
-              : undefined
-        })
-      );
-
-    res.json({
-      metas
-    });
-
-  } catch (err) {
-
-    console.error(
-      "CATALOG ERROR:",
-      err
-    );
-
-    res.status(500).json({
-      error: err.message
-    });
-  }
-}
-
-
-/* =========================================================
-   META
-========================================================= */
-
-app.get(
-  "/meta/:type/:id.json",
-  (req, res) => {
-
     try {
-
-      const id =
-        req.params.id.replace(
-          /^tg:/,
-          ""
+      const extra =
+        parseExtra(
+          req.params.extra
         );
 
-      const row =
-        getMediaById(id);
+      const rows =
+        getCatalogRows(
+          req.params.type,
+          extra.search || "",
+          extra.skip || 0
+        );
 
-      if (!row) {
-        return res
-          .status(404)
-          .json({
-            error:
-              "Media not found"
-          });
-      }
+      const metas =
+        rows.map(
+          (row) =>
+            makeMeta(
+              row,
+              req
+            )
+        );
 
       res.json({
-        meta:
-          makeMeta(row)
+        metas
       });
-
-    } catch (err) {
-
+    } catch (error) {
       console.error(
-        "META ERROR:",
-        err
+        "Catalog error:",
+        error
       );
 
       res.status(500).json({
-        error: err.message
+        metas: [],
+        error:
+          error.message
       });
     }
   }
 );
 
-
-/* =========================================================
-   STREAM
-========================================================= */
+/* -------------------------------------------------
+   CATALOG WITHOUT EXTRA
+------------------------------------------------- */
 
 app.get(
-  "/stream/:type/:id.json",
+  "/catalog/:type/:id.json",
   (req, res) => {
-
     try {
+      const rows =
+        getCatalogRows(
+          req.params.type,
+          "",
+          0
+        );
 
-      const id =
+      const metas =
+        rows.map(
+          (row) =>
+            makeMeta(
+              row,
+              req
+            )
+        );
+
+      res.json({
+        metas
+      });
+    } catch (error) {
+      console.error(
+        "Catalog error:",
+        error
+      );
+
+      res.status(500).json({
+        metas: [],
+        error:
+          error.message
+      });
+    }
+  }
+);
+
+/* -------------------------------------------------
+   META
+------------------------------------------------- */
+
+app.get(
+  "/meta/:type/:id.json",
+  (req, res) => {
+    try {
+      const rawId =
         req.params.id.replace(
           /^tg:/,
           ""
         );
 
       const row =
-        getMediaById(id);
+        getMediaById(rawId);
 
       if (!row) {
-        return res
-          .status(404)
-          .json({
-            error:
-              "Media not found"
-          });
+        return res.status(404).json({
+          meta: null
+        });
       }
 
-      const url =
-        `${BASE_URL}/file/${row.message_id}`;
+      res.json({
+        meta:
+          makeMeta(
+            row,
+            req
+          )
+      });
+    } catch (error) {
+      console.error(
+        "Meta error:",
+        error
+      );
+
+      res.status(500).json({
+        meta: null,
+        error:
+          error.message
+      });
+    }
+  }
+);
+
+/* -------------------------------------------------
+   STREAM
+------------------------------------------------- */
+
+app.get(
+  "/stream/:type/:id.json",
+  async (req, res) => {
+    try {
+      const rawId =
+        req.params.id.replace(
+          /^tg:/,
+          ""
+        );
+
+      const row =
+        getMediaById(rawId);
+
+      if (!row) {
+        return res.status(404).json({
+          streams: []
+        });
+      }
+
+      const baseUrl =
+        getBaseUrl(req);
 
       res.json({
         streams: [
           {
-            name:
-              "Telegram",
-
             title:
               row.title ||
               row.filename ||
-              "Telegram Media",
+              "Play",
 
-            url,
+            url:
+              `${baseUrl}/file/${row.message_id}`,
 
             behaviorHints: {
               notWebReady: false
@@ -458,213 +385,125 @@ app.get(
           }
         ]
       });
-
-    } catch (err) {
-
+    } catch (error) {
       console.error(
-        "STREAM ERROR:",
-        err
+        "Stream error:",
+        error
       );
 
       res.status(500).json({
-        error: err.message
+        streams: [],
+        error:
+          error.message
       });
     }
   }
 );
 
-
-/* =========================================================
-   DIRECT TELEGRAM FILE
-========================================================= */
+/* -------------------------------------------------
+   TELEGRAM FILE STREAM
+------------------------------------------------- */
 
 app.get(
   "/file/:messageId",
   async (req, res) => {
-
     try {
-
       const messageId =
         Number(
           req.params.messageId
         );
-
-      if (
-        !Number.isInteger(
-          messageId
-        )
-      ) {
-        return res
-          .status(400)
-          .send(
-            "Invalid message ID"
-          );
-      }
-
-      console.log(
-        `\nFile request: Telegram message ${messageId}`
-      );
 
       const message =
         await getMessage(
           messageId
         );
 
-      const file =
-        message.file;
-
-      if (!file) {
+      if (!message) {
         return res
           .status(404)
           .send(
-            "Telegram message has no media"
+            "Telegram message not found"
           );
       }
 
+      const media =
+        message.media;
+
+      const document =
+        media?.document;
+
       const fileSize =
         Number(
-          file.size || 0
+          document?.size || 0
         );
 
       if (!fileSize) {
         return res
           .status(500)
           .send(
-            "Telegram file size unavailable"
+            "File size unavailable"
           );
       }
 
       const mime =
-        file.mimeType ||
-        "application/octet-stream";
+        document?.mimeType ||
+        "video/mp4";
+
+      const range =
+        req.headers.range;
 
       let start = 0;
 
       let end =
         fileSize - 1;
 
-      const range =
-        req.headers.range;
-
-
-      /* =====================================================
-         RANGE REQUEST
-      ===================================================== */
-
       if (range) {
-
         const match =
           range.match(
             /bytes=(\d*)-(\d*)/
           );
 
-        if (!match) {
+        if (match) {
+          if (match[1]) {
+            start =
+              Number(match[1]);
+          }
 
-          return res
-            .status(416)
-            .set(
-              "Content-Range",
-              `bytes */${fileSize}`
-            )
-            .end();
+          if (match[2]) {
+            end =
+              Number(match[2]);
+          }
         }
+      }
 
-        const rangeStart =
-          match[1];
+      if (
+        start >= fileSize ||
+        end >= fileSize ||
+        start > end
+      ) {
+        res.status(416);
 
-        const rangeEnd =
-          match[2];
+        res.setHeader(
+          "Content-Range",
+          `bytes */${fileSize}`
+        );
 
+        return res.end();
+      }
 
-        /* bytes=1000- */
+      const contentLength =
+        end - start + 1;
 
-        if (
-          rangeStart !== ""
-        ) {
-          start =
-            Number(
-              rangeStart
-            );
-        }
-
-
-        /* bytes=1000-2000 */
-
-        if (
-          rangeEnd !== ""
-        ) {
-          end =
-            Number(
-              rangeEnd
-            );
-        }
-
-
-        /* bytes=-500000 */
-
-        if (
-          rangeStart === "" &&
-          rangeEnd !== ""
-        ) {
-
-          const suffix =
-            Number(
-              rangeEnd
-            );
-
-          start =
-            Math.max(
-              fileSize - suffix,
-              0
-            );
-
-          end =
-            fileSize - 1;
-        }
-
-
-        if (
-          end >= fileSize
-        ) {
-          end =
-            fileSize - 1;
-        }
-
-
-        if (
-          start < 0 ||
-          start >= fileSize ||
-          start > end
-        ) {
-
-          return res
-            .status(416)
-            .set(
-              "Content-Range",
-              `bytes */${fileSize}`
-            )
-            .end();
-        }
-
+      if (range) {
         res.status(206);
 
         res.setHeader(
           "Content-Range",
           `bytes ${start}-${end}/${fileSize}`
         );
-
       } else {
-
         res.status(200);
       }
-
-
-      /* =====================================================
-         HEADERS
-      ===================================================== */
-
-      const contentLength =
-        end - start + 1;
 
       res.setHeader(
         "Content-Type",
@@ -682,24 +521,9 @@ app.get(
       );
 
       res.setHeader(
-        "Content-Disposition",
-        "inline"
-      );
-
-      res.setHeader(
         "Cache-Control",
         "no-cache"
       );
-
-
-      console.log(
-        `Streaming ${start}-${end} / ${fileSize}`
-      );
-
-
-      /* =====================================================
-         TELEGRAM STREAM
-      ===================================================== */
 
       const stream =
         await streamMessage(
@@ -708,96 +532,113 @@ app.get(
           end
         );
 
-
       for await (
         const chunk of stream
       ) {
-
-        if (
-          res.destroyed
-        ) {
+        if (res.destroyed) {
           break;
         }
 
         res.write(chunk);
       }
 
-
-      if (
-        !res.destroyed
-      ) {
+      if (!res.destroyed) {
         res.end();
       }
-
-
-      console.log(
-        `Stream finished: ${messageId}`
-      );
-
-    } catch (err) {
-
+    } catch (error) {
       console.error(
-        "\nFILE STREAM ERROR:",
-        err
+        "File streaming error:",
+        error
       );
 
-      if (
-        !res.headersSent
-      ) {
-
+      if (!res.headersSent) {
         res
           .status(500)
           .send(
-            `Stream error: ${err.message}`
+            `Streaming error: ${error.message}`
           );
-
       } else {
-
-        res.destroy(err);
+        res.destroy();
       }
     }
   }
 );
 
+/* -------------------------------------------------
+   RENDER AUTO INDEXING
+------------------------------------------------- */
 
-/* =========================================================
-   START
-========================================================= */
+async function ensureIndexed() {
+  const db =
+    getDb();
 
-app.listen(
-  PORT,
-  "0.0.0.0",
-  () => {
+  const result =
+    db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM media"
+      )
+      .get();
 
-    console.log("");
+  const count =
+    Number(result.count);
+
+  console.log(
+    `Current database items: ${count}`
+  );
+
+  /*
+    Only index when database is empty.
+    This is required because Render Free
+    does not provide Shell access.
+  */
+
+  if (count === 0) {
     console.log(
-      "======================================"
+      "Database is empty."
     );
 
     console.log(
-      " Happy Telegram Media Addon"
+      "Starting first Telegram index..."
+    );
+
+    const indexed =
+      await indexTelegram();
+
+    console.log(
+      `Telegram indexing finished: ${indexed} items.`
+    );
+  } else {
+    console.log(
+      "Database already contains media."
     );
 
     console.log(
-      "======================================"
+      "Skipping Telegram indexing."
     );
-
-    console.log(
-      `Local: http://localhost:${PORT}`
-    );
-
-    console.log(
-      `Manifest: http://localhost:${PORT}/manifest.json`
-    );
-
-    console.log(
-      `Catalog: http://localhost:${PORT}/catalog/movie/happy-movies.json`
-    );
-
-    console.log(
-      "======================================"
-    );
-
-    console.log("");
   }
-);
+}
+
+/* -------------------------------------------------
+   START SERVER
+------------------------------------------------- */
+
+ensureIndexed()
+  .then(() => {
+    app.listen(
+      PORT,
+      "0.0.0.0",
+      () => {
+        console.log(
+          `Server running on port ${PORT}`
+        );
+      }
+    );
+  })
+  .catch((error) => {
+    console.error(
+      "Startup failed:",
+      error
+    );
+
+    process.exit(1);
+  });
