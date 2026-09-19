@@ -622,23 +622,25 @@ async function ensureIndexed() {
    START SERVER
 ------------------------------------------------- */
 
-ensureIndexed()
-  .then(() => {
-    app.listen(
-      PORT,
-      "0.0.0.0",
-      () => {
-        console.log(
-          `Server running on port ${PORT}`
-        );
-      }
-    );
-  })
-  .catch((error) => {
-    console.error(
-      "Startup failed:",
-      error
+app.listen(
+  PORT,
+  "0.0.0.0",
+  () => {
+    console.log(
+      `Server running on port ${PORT}`
     );
 
-    process.exit(1);
-  });
+    ensureIndexed()
+      .then(() => {
+        console.log(
+          "Startup indexing finished."
+        );
+      })
+      .catch((error) => {
+        console.error(
+          "Background indexing failed:",
+          error
+        );
+      });
+  }
+);
