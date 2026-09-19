@@ -1,0 +1,56 @@
+{
+  "id": "com.akshay.happytelegram",
+  "version": "1.0.0",
+  "name": "Happy Telegram",
+  "description": "Private Telegram media library",
+  "resources": [
+    "catalog",
+    "meta",
+    "stream"
+  ],
+  "types": [
+    "movie",
+    "series"
+  ],
+  "idPrefixes": [
+    "tg:"
+  ],
+  "catalogs": [
+    {
+      "type": "movie",
+      "id": "happy-movies",
+      "name": "Happy Movies",
+      "extra": [
+        {
+          "name": "search",
+          "isRequired": false
+        },
+        {
+          "name": "skip",
+          "isRequired": false
+        }
+      ]
+    },
+    {
+      "type": "series",
+      "id": "happy-series",
+      "name": "Happy Series",
+      "extra": [
+        {
+          "name": "search",
+          "isRequired": false
+        },
+        {
+          "name": "skip",
+          "isRequired": false
+        }
+      ]
+    }
+  ],
+  "behaviorHints": {
+    "adult": false,
+    "p2pNotSupported": true,
+    "configurable": false,
+    "configurationRequired": false
+  }
+}
