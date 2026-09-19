@@ -9,7 +9,7 @@ export async function indexTelegram() {
 
   console.log("Starting Telegram indexing...");
 
-  const messages = await iterateMessages(10000);
+  const messages = await iterateMessages(1000);
 
   console.log(
     `Telegram media messages found: ${messages.length}`
