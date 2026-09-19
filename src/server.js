@@ -8,7 +8,9 @@ import {
   streamMessage
 } from "./telegram.js";
 
-import { indexTelegram } from "./indexer.js";
+import {
+  indexTelegram
+} from "./indexer.js";
 
 dotenv.config();
 
@@ -565,56 +567,30 @@ app.get(
 );
 
 /* -------------------------------------------------
-   RENDER AUTO INDEXING
+   INCREMENTAL TELEGRAM INDEXING
 ------------------------------------------------- */
 
 async function ensureIndexed() {
-  const db =
-    getDb();
-
-  const result =
-    db
-      .prepare(
-        "SELECT COUNT(*) AS count FROM media"
-      )
-      .get();
-
-  const count =
-    Number(result.count);
-
   console.log(
-    `Current database items: ${count}`
+    "Checking Telegram for new media..."
   );
 
-  /*
-    Only index when database is empty.
-    This is required because Render Free
-    does not provide Shell access.
-  */
-
-  if (count === 0) {
-    console.log(
-      "Database is empty."
-    );
+  try {
+    await indexTelegram();
 
     console.log(
-      "Starting first Telegram index..."
+      "Telegram indexing check completed."
+    );
+  } catch (error) {
+    console.error(
+      "Telegram indexing failed:",
+      error
     );
 
-    const indexed =
-      await indexTelegram();
-
-    console.log(
-      `Telegram indexing finished: ${indexed} items.`
-    );
-  } else {
-    console.log(
-      "Database already contains media."
-    );
-
-    console.log(
-      "Skipping Telegram indexing."
-    );
+    /*
+      Do not crash the web server if
+      Telegram indexing fails.
+    */
   }
 }
 
@@ -630,17 +606,12 @@ app.listen(
       `Server running on port ${PORT}`
     );
 
-    ensureIndexed()
-      .then(() => {
-        console.log(
-          "Startup indexing finished."
-        );
-      })
-      .catch((error) => {
-        console.error(
-          "Background indexing failed:",
-          error
-        );
-      });
+    /*
+      Start indexing in background.
+      Server remains available even if
+      Telegram indexing encounters an error.
+    */
+
+    ensureIndexed();
   }
 );
