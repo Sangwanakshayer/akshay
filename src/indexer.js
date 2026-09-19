@@ -1,5 +1,4 @@
 import dotenv from "dotenv";
-import { Api } from "telegram";
 import { getDb } from "./db.js";
 import { iterateMessages } from "./telegram.js";
 
@@ -8,20 +7,22 @@ dotenv.config();
 function getDocument(message) {
   const media = message?.media;
 
-  if (!media) return null;
-
-  if (
-    media instanceof Api.MessageMediaDocument
-  ) {
-    if (
-      media.document instanceof Api.Document
-    ) {
-      return media.document;
-    }
+  if (!media) {
+    return null;
   }
 
+  // GramJS MessageMediaDocument
   if (
-    media.document instanceof Api.Document
+    media.document &&
+    media.document.className === "Document"
+  ) {
+    return media.document;
+  }
+
+  // Fallback: document object exists
+  if (
+    media.document &&
+    typeof media.document === "object"
   ) {
     return media.document;
   }
@@ -29,45 +30,44 @@ function getDocument(message) {
   return null;
 }
 
-function getDocumentInfo(document) {
-  let filename = "";
-  let width = null;
-  let height = null;
-
+function getFilename(document) {
   const attributes =
-    document.attributes || [];
+    document?.attributes || [];
 
   for (const attr of attributes) {
     if (
-      attr instanceof
-      Api.DocumentAttributeFilename
+      attr?.className ===
+      "DocumentAttributeFilename"
     ) {
-      filename =
-        attr.fileName || "";
+      return attr.fileName || "";
     }
+  }
 
+  return "";
+}
+
+function getVideoDimensions(document) {
+  const attributes =
+    document?.attributes || [];
+
+  for (const attr of attributes) {
     if (
-      attr instanceof
-      Api.DocumentAttributeVideo
+      attr?.className ===
+      "DocumentAttributeVideo"
     ) {
-      width =
-        Number(attr.w || 0) || null;
+      return {
+        width:
+          Number(attr.w || 0) || null,
 
-      height =
-        Number(attr.h || 0) || null;
+        height:
+          Number(attr.h || 0) || null
+      };
     }
   }
 
   return {
-    filename,
-    width,
-    height,
-    mime:
-      document.mimeType ||
-      "application/octet-stream",
-
-    size:
-      Number(document.size || 0)
+    width: null,
+    height: null
   };
 }
 
@@ -82,8 +82,7 @@ function getTitle(
   }
 
   const caption =
-    message?.message ||
-    "";
+    message?.message || "";
 
   if (caption) {
     return caption
@@ -92,7 +91,7 @@ function getTitle(
       .slice(0, 300);
   }
 
-  return `Telegram ${message.id}`;
+  return `Telegram ${message?.id || "Unknown"}`;
 }
 
 function getType(title) {
@@ -120,12 +119,12 @@ function getYear(title) {
 function getCreatedAt(message) {
   try {
     if (
-      message.date instanceof Date
+      message?.date instanceof Date
     ) {
       return message.date.toISOString();
     }
 
-    if (message.date) {
+    if (message?.date) {
       return new Date(
         Number(message.date) * 1000
       ).toISOString();
@@ -210,21 +209,24 @@ export async function indexTelegram() {
             skipped++;
 
             console.log(
-              `Skipped ${message.id}: no document`
+              `Skipped message ${message?.id}: no document`
             );
 
             continue;
           }
 
-          const info =
-            getDocumentInfo(
+          const filename =
+            getFilename(document);
+
+          const dimensions =
+            getVideoDimensions(
               document
             );
 
           const title =
             getTitle(
               message,
-              info.filename
+              filename
             );
 
           const type =
@@ -234,8 +236,16 @@ export async function indexTelegram() {
             getYear(title);
 
           const caption =
-            message.message ||
-            "";
+            message?.message || "";
+
+          const mime =
+            document?.mimeType ||
+            "video/mp4";
+
+          const size =
+            Number(
+              document?.size || 0
+            );
 
           insert.run({
             message_id:
@@ -247,20 +257,17 @@ export async function indexTelegram() {
 
             type,
 
-            filename:
-              info.filename,
+            filename,
 
-            mime:
-              info.mime,
+            mime,
 
-            size:
-              info.size,
+            size,
 
             width:
-              info.width,
+              dimensions.width,
 
             height:
-              info.height,
+              dimensions.height,
 
             caption,
 
@@ -274,7 +281,7 @@ export async function indexTelegram() {
           indexed++;
 
           console.log(
-            `Indexed ${indexed}/${rows.length}: ${title}`
+            `Indexed ${indexed}: ${title}`
           );
         } catch (error) {
           console.error(
@@ -288,9 +295,11 @@ export async function indexTelegram() {
   run(messages);
 
   const result =
-    db.prepare(
-      "SELECT COUNT(*) AS count FROM media"
-    ).get();
+    db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM media"
+      )
+      .get();
 
   console.log(
     `Indexing complete. Database contains ${result.count} media items.`
