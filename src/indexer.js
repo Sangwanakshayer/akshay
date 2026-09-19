@@ -12,6 +12,10 @@ import {
 
 dotenv.config();
 
+/* -------------------------------------------------
+   DOCUMENT
+------------------------------------------------- */
+
 function getDocument(message) {
   const media =
     message?.media;
@@ -31,13 +35,19 @@ function getDocument(message) {
   return null;
 }
 
+/* -------------------------------------------------
+   FILENAME
+------------------------------------------------- */
+
 function getFilename(
   document
 ) {
   const attributes =
     document?.attributes || [];
 
-  for (const attr of attributes) {
+  for (
+    const attr of attributes
+  ) {
     if (
       attr?.className ===
       "DocumentAttributeFilename"
@@ -51,25 +61,33 @@ function getFilename(
   return "";
 }
 
+/* -------------------------------------------------
+   VIDEO DIMENSIONS
+------------------------------------------------- */
+
 function getDimensions(
   document
 ) {
   const attributes =
     document?.attributes || [];
 
-  for (const attr of attributes) {
+  for (
+    const attr of attributes
+  ) {
     if (
       attr?.className ===
       "DocumentAttributeVideo"
     ) {
       return {
         width:
-          Number(attr.w || 0) ||
-          null,
+          Number(
+            attr.w || 0
+          ) || null,
 
         height:
-          Number(attr.h || 0) ||
-          null
+          Number(
+            attr.h || 0
+          ) || null
       };
     }
   }
@@ -80,13 +98,20 @@ function getDimensions(
   };
 }
 
+/* -------------------------------------------------
+   TITLE
+------------------------------------------------- */
+
 function getTitle(
   message,
   filename
 ) {
   if (filename) {
     return filename
-      .replace(/\.[^/.]+$/, "")
+      .replace(
+        /\.[^/.]+$/,
+        ""
+      )
       .trim();
   }
 
@@ -103,6 +128,10 @@ function getTitle(
   return `Telegram ${message.id}`;
 }
 
+/* -------------------------------------------------
+   TYPE
+------------------------------------------------- */
+
 function getType(title) {
   if (
     /s\d{1,2}e\d{1,2}/i.test(
@@ -118,6 +147,10 @@ function getType(title) {
   return "movie";
 }
 
+/* -------------------------------------------------
+   YEAR
+------------------------------------------------- */
+
 function getYear(title) {
   const match =
     title.match(
@@ -129,7 +162,13 @@ function getYear(title) {
     : null;
 }
 
-function getCreatedAt(message) {
+/* -------------------------------------------------
+   CREATED DATE
+------------------------------------------------- */
+
+function getCreatedAt(
+  message
+) {
   try {
     if (
       message?.date instanceof
@@ -141,8 +180,9 @@ function getCreatedAt(message) {
 
     if (message?.date) {
       return new Date(
-        Number(message.date) *
-          1000
+        Number(
+          message.date
+        ) * 1000
       ).toISOString();
     }
   } catch {
@@ -152,54 +192,76 @@ function getCreatedAt(message) {
   return null;
 }
 
-export async function indexTelegram() {
+/* -------------------------------------------------
+   INDEX ONE MESSAGE
+------------------------------------------------- */
+
+export async function indexSingleMessage(
+  message
+) {
   const db =
     getDb();
 
-  const storedLastId =
-    Number(
-      getState(
-        "last_message_id"
-      ) || 0
-    );
-
-  console.log(
-    `Last indexed Telegram message ID: ${storedLastId}`
-  );
-
-  /*
-    First run:
-    read up to 10000 messages.
-
-    Later runs:
-    only read messages newer
-    than last indexed ID.
-  */
-
-  const limit =
-    storedLastId > 0
-      ? 1000
-      : 10000;
-
-  const messages =
-    await iterateMessages(
-      limit,
-      storedLastId
-    );
-
-  console.log(
-    `Messages returned for indexing: ${messages.length}`
-  );
-
-  if (
-    messages.length === 0
-  ) {
-    console.log(
-      "No new Telegram media found."
-    );
-
-    return;
+  if (!message) {
+    return false;
   }
+
+  const messageId =
+    Number(
+      message.id
+    );
+
+  if (!messageId) {
+    return false;
+  }
+
+  const document =
+    getDocument(
+      message
+    );
+
+  if (!document) {
+    console.log(
+      `Message ${messageId} has no document media. Skipping.`
+    );
+
+    return false;
+  }
+
+  const filename =
+    getFilename(
+      document
+    );
+
+  const dimensions =
+    getDimensions(
+      document
+    );
+
+  const title =
+    getTitle(
+      message,
+      filename
+    );
+
+  const type =
+    getType(title);
+
+  const year =
+    getYear(title);
+
+  const caption =
+    message.message ||
+    "";
+
+  const mime =
+    document.mimeType ||
+    "video/mp4";
+
+  const size =
+    Number(
+      document.size || 0
+    );
 
   const insert =
     db.prepare(`
@@ -242,144 +304,165 @@ export async function indexTelegram() {
         width = excluded.width,
         height = excluded.height,
         caption = excluded.caption,
-        created_at = excluded.created_at,
         indexed_at = excluded.indexed_at
     `);
 
+  insert.run({
+    message_id:
+      messageId,
+
+    title,
+
+    year,
+
+    type,
+
+    filename,
+
+    mime,
+
+    size,
+
+    width:
+      dimensions.width,
+
+    height:
+      dimensions.height,
+
+    caption,
+
+    created_at:
+      getCreatedAt(
+        message
+      ),
+
+    indexed_at:
+      new Date()
+        .toISOString()
+  });
+
+  /*
+    Update the highest known message ID.
+  */
+
+  const currentLastId =
+    Number(
+      getState(
+        "last_message_id"
+      ) || 0
+    );
+
+  if (
+    messageId >
+    currentLastId
+  ) {
+    setState(
+      "last_message_id",
+      messageId
+    );
+  }
+
+  console.log(
+    `Indexed realtime message: ${messageId} | ${title}`
+  );
+
+  return true;
+}
+
+/* -------------------------------------------------
+   FULL / INCREMENTAL CATCH-UP INDEX
+------------------------------------------------- */
+
+export async function indexTelegram() {
+  const db =
+    getDb();
+
+  const storedLastId =
+    Number(
+      getState(
+        "last_message_id"
+      ) || 0
+    );
+
+  console.log(
+    `Last indexed Telegram message ID: ${storedLastId}`
+  );
+
+  const limit =
+    storedLastId > 0
+      ? 1000
+      : 10000;
+
+  const messages =
+    await iterateMessages(
+      limit,
+      storedLastId
+    );
+
+  console.log(
+    `Messages returned for indexing: ${messages.length}`
+  );
+
+  if (
+    messages.length === 0
+  ) {
+    console.log(
+      "No new Telegram media found."
+    );
+
+    return;
+  }
+
   let indexed = 0;
+
   let skipped = 0;
 
   let highestMessageId =
     storedLastId;
 
-  const run =
-    db.transaction(
-      (rows) => {
-
-        for (
-          const message of rows
-        ) {
-          try {
-            const messageId =
-              Number(
-                message.id
-              );
-
-            if (
-              messageId >
-              highestMessageId
-            ) {
-              highestMessageId =
-                messageId;
-            }
-
-            const document =
-              getDocument(
-                message
-              );
-
-            if (!document) {
-              skipped++;
-
-              continue;
-            }
-
-            const filename =
-              getFilename(
-                document
-              );
-
-            const dimensions =
-              getDimensions(
-                document
-              );
-
-            const title =
-              getTitle(
-                message,
-                filename
-              );
-
-            const type =
-              getType(title);
-
-            const year =
-              getYear(title);
-
-            const caption =
-              message.message ||
-              "";
-
-            const mime =
-              document.mimeType ||
-              "video/mp4";
-
-            const size =
-              Number(
-                document.size || 0
-              );
-
-            insert.run({
-              message_id:
-                messageId,
-
-              title,
-
-              year,
-
-              type,
-
-              filename,
-
-              mime,
-
-              size,
-
-              width:
-                dimensions.width,
-
-              height:
-                dimensions.height,
-
-              caption,
-
-              created_at:
-                getCreatedAt(
-                  message
-                ),
-
-              indexed_at:
-                new Date()
-                  .toISOString()
-            });
-
-            indexed++;
-
-            console.log(
-              `Indexed: ${title}`
-            );
-
-          } catch (error) {
-            skipped++;
-
-            console.error(
-              `Failed to index message ${
-                message?.id
-              }:`,
-              error.message
-            );
-          }
-        }
-      }
-    );
-
-  run(messages);
-
   /*
-    Save highest Telegram
-    message ID only after
-    successful transaction.
+    Process messages one by one.
+    This is safer for realtime updates.
   */
+
+  for (
+    const message of messages
+  ) {
+    try {
+      const messageId =
+        Number(
+          message.id
+        );
+
+      if (
+        messageId >
+        highestMessageId
+      ) {
+        highestMessageId =
+          messageId;
+      }
+
+      const success =
+        await indexSingleMessage(
+          message
+        );
+
+      if (success) {
+        indexed++;
+      } else {
+        skipped++;
+      }
+    } catch (error) {
+      skipped++;
+
+      console.error(
+        `Failed to index message ${
+          message?.id
+        }:`,
+        error.message
+      );
+    }
+  }
 
   if (
     highestMessageId >
@@ -416,6 +499,10 @@ export async function indexTelegram() {
 
   return result.count;
 }
+
+/* -------------------------------------------------
+   DIRECT EXECUTION
+------------------------------------------------- */
 
 if (
   process.argv[1]?.endsWith(
