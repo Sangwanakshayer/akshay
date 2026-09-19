@@ -1,171 +1,316 @@
 import dotenv from "dotenv";
+import { Api } from "telegram";
 import { getDb } from "./db.js";
 import { iterateMessages } from "./telegram.js";
 
 dotenv.config();
 
+function getDocument(message) {
+  const media = message?.media;
+
+  if (!media) return null;
+
+  if (
+    media instanceof Api.MessageMediaDocument
+  ) {
+    if (
+      media.document instanceof Api.Document
+    ) {
+      return media.document;
+    }
+  }
+
+  if (
+    media.document instanceof Api.Document
+  ) {
+    return media.document;
+  }
+
+  return null;
+}
+
+function getDocumentInfo(document) {
+  let filename = "";
+  let width = null;
+  let height = null;
+
+  const attributes =
+    document.attributes || [];
+
+  for (const attr of attributes) {
+    if (
+      attr instanceof
+      Api.DocumentAttributeFilename
+    ) {
+      filename =
+        attr.fileName || "";
+    }
+
+    if (
+      attr instanceof
+      Api.DocumentAttributeVideo
+    ) {
+      width =
+        Number(attr.w || 0) || null;
+
+      height =
+        Number(attr.h || 0) || null;
+    }
+  }
+
+  return {
+    filename,
+    width,
+    height,
+    mime:
+      document.mimeType ||
+      "application/octet-stream",
+
+    size:
+      Number(document.size || 0)
+  };
+}
+
+function getTitle(
+  message,
+  filename
+) {
+  if (filename) {
+    return filename
+      .replace(/\.[^/.]+$/, "")
+      .trim();
+  }
+
+  const caption =
+    message?.message ||
+    "";
+
+  if (caption) {
+    return caption
+      .split("\n")[0]
+      .trim()
+      .slice(0, 300);
+  }
+
+  return `Telegram ${message.id}`;
+}
+
+function getType(title) {
+  if (
+    /s\d{1,2}e\d{1,2}/i.test(title) ||
+    /season|episode|series/i.test(title)
+  ) {
+    return "series";
+  }
+
+  return "movie";
+}
+
+function getYear(title) {
+  const match =
+    title.match(
+      /\b(19|20)\d{2}\b/
+    );
+
+  return match
+    ? Number(match[0])
+    : null;
+}
+
+function getCreatedAt(message) {
+  try {
+    if (
+      message.date instanceof Date
+    ) {
+      return message.date.toISOString();
+    }
+
+    if (message.date) {
+      return new Date(
+        Number(message.date) * 1000
+      ).toISOString();
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
 export async function indexTelegram() {
   const db = getDb();
 
-  console.log("Starting Telegram indexing...");
+  console.log(
+    "Starting Telegram indexing..."
+  );
 
-  const messages = await iterateMessages(1000);
+  const messages =
+    await iterateMessages(10000);
 
   console.log(
     `Telegram media messages found: ${messages.length}`
   );
 
-  const insert = db.prepare(`
-    INSERT INTO media (
-      message_id,
-      title,
-      year,
-      type,
-      filename,
-      mime,
-      size,
-      width,
-      height,
-      caption,
-      created_at,
-      indexed_at
-    )
-    VALUES (
-      @message_id,
-      @title,
-      @year,
-      @type,
-      @filename,
-      @mime,
-      @size,
-      @width,
-      @height,
-      @caption,
-      @created_at,
-      @indexed_at
-    )
-    ON CONFLICT(message_id)
-    DO UPDATE SET
-      title = excluded.title,
-      year = excluded.year,
-      type = excluded.type,
-      filename = excluded.filename,
-      mime = excluded.mime,
-      size = excluded.size,
-      width = excluded.width,
-      height = excluded.height,
-      caption = excluded.caption,
-      created_at = excluded.created_at,
-      indexed_at = excluded.indexed_at
-  `);
+  const insert =
+    db.prepare(`
+      INSERT INTO media (
+        message_id,
+        title,
+        year,
+        type,
+        filename,
+        mime,
+        size,
+        width,
+        height,
+        caption,
+        created_at,
+        indexed_at
+      )
+      VALUES (
+        @message_id,
+        @title,
+        @year,
+        @type,
+        @filename,
+        @mime,
+        @size,
+        @width,
+        @height,
+        @caption,
+        @created_at,
+        @indexed_at
+      )
+      ON CONFLICT(message_id)
+      DO UPDATE SET
+        title = excluded.title,
+        year = excluded.year,
+        type = excluded.type,
+        filename = excluded.filename,
+        mime = excluded.mime,
+        size = excluded.size,
+        width = excluded.width,
+        height = excluded.height,
+        caption = excluded.caption,
+        created_at = excluded.created_at,
+        indexed_at = excluded.indexed_at
+    `);
 
-  const run = db.transaction((rows) => {
-    for (const message of rows) {
-      try {
-        let file = null;
+  let indexed = 0;
+  let skipped = 0;
 
+  const run =
+    db.transaction((rows) => {
+      for (const message of rows) {
         try {
-          file = message.file;
-        } catch {
-          file = null;
+          const document =
+            getDocument(message);
+
+          if (!document) {
+            skipped++;
+
+            console.log(
+              `Skipped ${message.id}: no document`
+            );
+
+            continue;
+          }
+
+          const info =
+            getDocumentInfo(
+              document
+            );
+
+          const title =
+            getTitle(
+              message,
+              info.filename
+            );
+
+          const type =
+            getType(title);
+
+          const year =
+            getYear(title);
+
+          const caption =
+            message.message ||
+            "";
+
+          insert.run({
+            message_id:
+              Number(message.id),
+
+            title,
+
+            year,
+
+            type,
+
+            filename:
+              info.filename,
+
+            mime:
+              info.mime,
+
+            size:
+              info.size,
+
+            width:
+              info.width,
+
+            height:
+              info.height,
+
+            caption,
+
+            created_at:
+              getCreatedAt(message),
+
+            indexed_at:
+              new Date().toISOString()
+          });
+
+          indexed++;
+
+          console.log(
+            `Indexed ${indexed}/${rows.length}: ${title}`
+          );
+        } catch (error) {
+          console.error(
+            `Failed to index message ${message?.id}:`,
+            error.message
+          );
         }
-
-        if (!file) continue;
-
-        const filename = file.name || "";
-        const mime = file.mimeType || "";
-
-        const caption =
-          message.message ||
-          message.text ||
-          "";
-
-        let title = filename
-          ? filename.replace(/\.[^/.]+$/, "").trim()
-          : "";
-
-        if (!title && caption) {
-          title = caption
-            .split("\n")[0]
-            .trim();
-        }
-
-        if (!title) {
-          title = `Telegram ${message.id}`;
-        }
-
-        let type = "movie";
-
-        if (
-          /s\d{1,2}e\d{1,2}/i.test(title) ||
-          /season|episode|series/i.test(title)
-        ) {
-          type = "series";
-        }
-
-        const yearMatch = title.match(
-          /\b(19|20)\d{2}\b/
-        );
-
-        const year = yearMatch
-          ? Number(yearMatch[0])
-          : null;
-
-        insert.run({
-          message_id: Number(message.id),
-          title,
-          year,
-          type,
-          filename,
-          mime,
-          size: Number(file.size || 0),
-          width:
-            Number(file.width || 0) || null,
-          height:
-            Number(file.height || 0) || null,
-          caption,
-          created_at: message.date
-            ? new Date(
-                message.date * 1000
-              ).toISOString()
-            : null,
-          indexed_at:
-            new Date().toISOString()
-        });
-
-        console.log(
-          `Indexed: ${message.id} - ${title}`
-        );
-      } catch (error) {
-        console.error(
-          `Failed to index message ${message?.id}:`,
-          error.message
-        );
       }
-    }
-  });
+    });
 
   run(messages);
 
-  const result = db
-    .prepare(
+  const result =
+    db.prepare(
       "SELECT COUNT(*) AS count FROM media"
-    )
-    .get();
+    ).get();
 
   console.log(
     `Indexing complete. Database contains ${result.count} media items.`
   );
 
+  console.log(
+    `Indexed this run: ${indexed}`
+  );
+
+  console.log(
+    `Skipped this run: ${skipped}`
+  );
+
   return result.count;
 }
 
-/*
-  Allows:
-  npm run index
-*/
 if (
-  process.argv[1]?.endsWith("indexer.js")
+  process.argv[1]?.endsWith(
+    "indexer.js"
+  )
 ) {
   indexTelegram()
     .then(() => {
