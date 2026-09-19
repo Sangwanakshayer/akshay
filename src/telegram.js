@@ -1,13 +1,16 @@
 import dotenv from "dotenv";
 import { TelegramClient, Api } from "telegram";
-import { StringSession } from "telegram/sessions/index.js";
+import {
+  StringSession
+} from "telegram/sessions/index.js";
 import bigInt from "big-integer";
 
 dotenv.config();
 
-const apiId = Number(
-  process.env.TELEGRAM_API_ID
-);
+const apiId =
+  Number(
+    process.env.TELEGRAM_API_ID
+  );
 
 const apiHash =
   process.env.TELEGRAM_API_HASH;
@@ -19,23 +22,20 @@ const session =
 
 let client = null;
 
-/* ---------------------------------------------
-   TELEGRAM CLIENT
---------------------------------------------- */
-
 export async function getClient() {
   if (client) {
     return client;
   }
 
-  client = new TelegramClient(
-    session,
-    apiId,
-    apiHash,
-    {
-      connectionRetries: 3
-    }
-  );
+  client =
+    new TelegramClient(
+      session,
+      apiId,
+      apiHash,
+      {
+        connectionRetries: 3
+      }
+    );
 
   await client.connect();
 
@@ -46,10 +46,6 @@ export async function getClient() {
   return client;
 }
 
-/* ---------------------------------------------
-   CHANNEL
---------------------------------------------- */
-
 export async function getChannel() {
   const c =
     await getClient();
@@ -58,10 +54,6 @@ export async function getChannel() {
     process.env.TELEGRAM_CHANNEL
   );
 }
-
-/* ---------------------------------------------
-   GET SINGLE MESSAGE
---------------------------------------------- */
 
 export async function getMessage(
   messageId
@@ -87,12 +79,15 @@ export async function getMessage(
   );
 }
 
-/* ---------------------------------------------
-   ITERATE TELEGRAM MEDIA
---------------------------------------------- */
+/*
+  If minId is supplied:
+  only messages newer than minId
+  are collected.
+*/
 
 export async function iterateMessages(
-  limit = 10000
+  limit = 1000,
+  minId = 0
 ) {
   const c =
     await getClient();
@@ -103,15 +98,22 @@ export async function iterateMessages(
   const result = [];
 
   console.log(
-    `Reading Telegram messages, limit: ${limit}`
+    `Reading Telegram messages. limit=${limit}, minId=${minId}`
   );
+
+  const options = {
+    limit
+  };
+
+  if (Number(minId) > 0) {
+    options.minId =
+      Number(minId);
+  }
 
   for await (
     const msg of c.iterMessages(
       channel,
-      {
-        limit
-      }
+      options
     )
   ) {
     try {
@@ -123,10 +125,6 @@ export async function iterateMessages(
         Number(msg.id);
 
       if (!messageId) {
-        console.log(
-          "Skipping message without ID"
-        );
-
         continue;
       }
 
@@ -157,10 +155,6 @@ export async function iterateMessages(
 
   return result;
 }
-
-/* ---------------------------------------------
-   GET TELEGRAM DOCUMENT
---------------------------------------------- */
 
 function getDocumentFromMessage(
   message
@@ -197,10 +191,6 @@ function getDocumentFromMessage(
     return media.document;
   }
 
-  /*
-    Fallback for GramJS objects
-  */
-
   if (
     media.document &&
     typeof media.document ===
@@ -216,10 +206,6 @@ function getDocumentFromMessage(
     }`
   );
 }
-
-/* ---------------------------------------------
-   STREAM TELEGRAM FILE
---------------------------------------------- */
 
 export async function streamMessage(
   message,
@@ -247,10 +233,6 @@ export async function streamMessage(
 
   const requestSize =
     512 * 1024;
-
-  /*
-    Telegram requires aligned offsets.
-  */
 
   const alignedStart =
     Math.floor(
@@ -288,21 +270,6 @@ export async function streamMessage(
       thumbSize: ""
     });
 
-  console.log(
-    `Telegram stream: ${start}-${
-      end ??
-      fileSize - 1
-    } / ${fileSize}`
-  );
-
-  console.log(
-    `Aligned offset: ${alignedStart}`
-  );
-
-  console.log(
-    `Chunks: ${chunks}`
-  );
-
   const iterator =
     c.iterDownload({
       file: location,
@@ -312,8 +279,7 @@ export async function streamMessage(
           alignedStart
         ),
 
-      limit:
-        chunks,
+      limit: chunks,
 
       requestSize,
 
@@ -332,14 +298,7 @@ export async function streamMessage(
       const chunk of iterator
     ) {
       let data =
-        Buffer.from(
-          chunk
-        );
-
-      /*
-        Remove bytes before
-        requested range.
-      */
+        Buffer.from(chunk);
 
       if (
         skipped < skip
@@ -358,11 +317,6 @@ export async function streamMessage(
         skipped +=
           remove;
       }
-
-      /*
-        Don't send more than
-        requested bytes.
-      */
 
       if (
         data.length >
