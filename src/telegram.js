@@ -3,6 +3,11 @@ import { TelegramClient, Api } from "telegram";
 import {
   StringSession
 } from "telegram/sessions/index.js";
+
+import {
+  NewMessage
+} from "telegram/events/index.js";
+
 import bigInt from "big-integer";
 
 dotenv.config();
@@ -21,6 +26,11 @@ const session =
   );
 
 let client = null;
+let updateHandlerStarted = false;
+
+/* -------------------------------------------------
+   GET TELEGRAM CLIENT
+------------------------------------------------- */
 
 export async function getClient() {
   if (client) {
@@ -43,8 +53,14 @@ export async function getClient() {
     "Telegram connected"
   );
 
+  await startRealtimeListener();
+
   return client;
 }
+
+/* -------------------------------------------------
+   GET CHANNEL
+------------------------------------------------- */
 
 export async function getChannel() {
   const c =
@@ -54,6 +70,10 @@ export async function getChannel() {
     process.env.TELEGRAM_CHANNEL
   );
 }
+
+/* -------------------------------------------------
+   GET MESSAGE
+------------------------------------------------- */
 
 export async function getMessage(
   messageId
@@ -79,14 +99,12 @@ export async function getMessage(
   );
 }
 
-/*
-  If minId is supplied:
-  only messages newer than minId
-  are collected.
-*/
+/* -------------------------------------------------
+   READ TELEGRAM MESSAGES
+------------------------------------------------- */
 
 export async function iterateMessages(
-  limit = 1000,
+  limit = 10000,
   minId = 0
 ) {
   const c =
@@ -98,14 +116,16 @@ export async function iterateMessages(
   const result = [];
 
   console.log(
-    `Reading Telegram messages. limit=${limit}, minId=${minId}`
+    `Reading Telegram messages, limit=${limit}, minId=${minId}`
   );
 
   const options = {
     limit
   };
 
-  if (Number(minId) > 0) {
+  if (
+    Number(minId) > 0
+  ) {
     options.minId =
       Number(minId);
   }
@@ -140,7 +160,6 @@ export async function iterateMessages(
       );
 
       result.push(msg);
-
     } catch (error) {
       console.error(
         "Error reading Telegram message:",
@@ -155,6 +174,10 @@ export async function iterateMessages(
 
   return result;
 }
+
+/* -------------------------------------------------
+   DOCUMENT FROM MESSAGE
+------------------------------------------------- */
 
 function getDocumentFromMessage(
   message
@@ -206,6 +229,10 @@ function getDocumentFromMessage(
     }`
   );
 }
+
+/* -------------------------------------------------
+   STREAM TELEGRAM FILE
+------------------------------------------------- */
 
 export async function streamMessage(
   message,
@@ -270,6 +297,21 @@ export async function streamMessage(
       thumbSize: ""
     });
 
+  console.log(
+    `Telegram stream: ${start}-${
+      end ??
+      fileSize - 1
+    } / ${fileSize}`
+  );
+
+  console.log(
+    `Aligned offset: ${alignedStart}`
+  );
+
+  console.log(
+    `Chunks: ${chunks}`
+  );
+
   const iterator =
     c.iterDownload({
       file: location,
@@ -293,7 +335,6 @@ export async function streamMessage(
     bytesNeeded;
 
   return (async function* () {
-
     for await (
       const chunk of iterator
     ) {
@@ -344,6 +385,122 @@ export async function streamMessage(
         break;
       }
     }
-
   })();
+}
+
+/* -------------------------------------------------
+   REALTIME TELEGRAM LISTENER
+------------------------------------------------- */
+
+async function startRealtimeListener() {
+  if (updateHandlerStarted) {
+    return;
+  }
+
+  updateHandlerStarted = true;
+
+  const c =
+    client;
+
+  const channel =
+    await c.getEntity(
+      process.env.TELEGRAM_CHANNEL
+    );
+
+  console.log(
+    "Starting Telegram realtime listener..."
+  );
+
+  c.addEventHandler(
+    async (event) => {
+      try {
+        const message =
+          event?.message;
+
+        if (!message) {
+          return;
+        }
+
+        const messageId =
+          Number(message.id);
+
+        if (!messageId) {
+          return;
+        }
+
+        /*
+          Make sure the update belongs
+          to our configured Telegram channel.
+        */
+
+        const peerId =
+          message?.peerId;
+
+        let sameChannel =
+          false;
+
+        if (
+          peerId?.channelId
+        ) {
+          sameChannel =
+            String(
+              peerId.channelId
+            ) ===
+            String(
+              channel.id
+            );
+        }
+
+        if (!sameChannel) {
+          return;
+        }
+
+        /*
+          Ignore messages without media.
+        */
+
+        if (!message.media) {
+          return;
+        }
+
+        console.log(
+          `Realtime media received: ${messageId}`
+        );
+
+        /*
+          Import here to avoid circular
+          module initialization problems.
+        */
+
+        const {
+          indexSingleMessage
+        } = await import(
+          "./indexer.js"
+        );
+
+        await indexSingleMessage(
+          message
+        );
+
+        console.log(
+          `Realtime indexing completed: ${messageId}`
+        );
+      } catch (error) {
+        console.error(
+          "Realtime Telegram update error:",
+          error
+        );
+      }
+    },
+
+    new NewMessage({
+      chats: [
+        channel
+      ]
+    })
+  );
+
+  console.log(
+    "Telegram realtime listener started."
+  );
 }
