@@ -91,6 +91,9 @@ public class MainActivity extends Activity {
             .putString("tpdb", tpdbToken.getText().toString().trim())
             .apply();
         getSharedPreferences("host", MODE_PRIVATE).edit()
+            .putString("apiId", apiId.getText().toString().trim())
+            .putString("apiHash", apiHash.getText().toString().trim())
+            .putString("phone", phone.getText().toString().trim())
             .putString("channel", channel.getText().toString().trim())
             .putString("tpdb", tpdbToken.getText().toString().trim())
             .apply();
