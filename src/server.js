@@ -1663,7 +1663,8 @@ function makeMeta(
         : "";
 
     const validBackground =
-      /^https?:\\/\\//i.test(rawBackground) &&
+      (rawBackground.startsWith("http://") ||
+       rawBackground.startsWith("https://")) &&
       rawBackground !== "[object Object]";
 
     meta.background =
