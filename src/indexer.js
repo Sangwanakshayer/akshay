@@ -1,22 +1,51 @@
 import dotenv from "dotenv";
 
 import {
+  Api
+} from "telegram";
+
+import {
   getDb,
   getState,
   setState
 } from "./db.js";
 
 import {
+  getClient,
+  getChannel,
   iterateMessages
 } from "./telegram.js";
 
+import {
+  searchTPDB
+} from "./tpdb.js";
+
 dotenv.config();
 
-/* -------------------------------------------------
-   DOCUMENT
-------------------------------------------------- */
+const db =
+  getDb();
 
-function getDocument(message) {
+
+// ======================================================
+// HELPERS
+// ======================================================
+
+function cleanText(
+  value
+) {
+  if (!value) {
+    return "";
+  }
+
+  return String(value)
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+
+function getDocument(
+  message
+) {
   const media =
     message?.media;
 
@@ -25,9 +54,14 @@ function getDocument(message) {
   }
 
   if (
-    media.document &&
-    typeof media.document ===
-      "object"
+    media instanceof
+    Api.MessageMediaDocument
+  ) {
+    return media.document;
+  }
+
+  if (
+    media.document
   ) {
     return media.document;
   }
@@ -35,111 +69,208 @@ function getDocument(message) {
   return null;
 }
 
-/* -------------------------------------------------
-   FILENAME
-------------------------------------------------- */
 
 function getFilename(
-  document
+  document,
+  message
 ) {
   const attributes =
     document?.attributes || [];
 
   for (
-    const attr of attributes
+    const attribute
+    of attributes
   ) {
     if (
-      attr?.className ===
-      "DocumentAttributeFilename"
+      attribute instanceof
+      Api.DocumentAttributeFilename
     ) {
       return (
-        attr.fileName || ""
+        attribute.fileName ||
+        attribute.filename ||
+        ""
       );
     }
   }
 
-  return "";
+  return (
+    message?.file?.name ||
+    message?.media?.document?.fileName ||
+    "Telegram Media"
+  );
 }
 
-/* -------------------------------------------------
-   VIDEO DIMENSIONS
-------------------------------------------------- */
 
-function getDimensions(
+function getVideoInfo(
   document
 ) {
   const attributes =
     document?.attributes || [];
 
+  let width = null;
+  let height = null;
+  let duration = null;
+
   for (
-    const attr of attributes
+    const attribute
+    of attributes
   ) {
     if (
-      attr?.className ===
-      "DocumentAttributeVideo"
+      attribute instanceof
+      Api.DocumentAttributeVideo
     ) {
-      return {
-        width:
-          Number(
-            attr.w || 0
-          ) || null,
+      width =
+        Number(
+          attribute.w || 0
+        ) || null;
 
-        height:
-          Number(
-            attr.h || 0
-          ) || null
-      };
+      height =
+        Number(
+          attribute.h || 0
+        ) || null;
+
+      duration =
+        Number(
+          attribute.duration || 0
+        ) || null;
+
+      break;
     }
   }
 
   return {
-    width: null,
-    height: null
+    width,
+    height,
+    duration
   };
 }
 
-/* -------------------------------------------------
-   TITLE
-------------------------------------------------- */
 
-function getTitle(
-  message,
-  filename
+function extractYear(
+  text
 ) {
-  if (filename) {
-    return filename
-      .replace(
-        /\.[^/.]+$/,
-        ""
-      )
-      .trim();
-  }
+  const match =
+    String(text).match(
+      /\b(19\d{2}|20\d{2})\b/
+    );
 
-  const caption =
-    message?.message || "";
-
-  if (caption) {
-    return caption
-      .split("\n")[0]
-      .trim()
-      .slice(0, 300);
-  }
-
-  return `Telegram ${message.id}`;
+  return match
+    ? Number(match[1])
+    : null;
 }
 
-/* -------------------------------------------------
-   TYPE
-------------------------------------------------- */
 
-function getType(title) {
+function extractEpisode(
+  text
+) {
+  let match =
+    String(text).match(
+      /\bS(\d{1,2})E(\d{1,3})\b/i
+    );
+
+  if (match) {
+    return {
+      season:
+        Number(match[1]),
+
+      episode:
+        Number(match[2])
+    };
+  }
+
+  match =
+    String(text).match(
+      /\b(\d{1,2})x(\d{1,3})\b/i
+    );
+
+  if (match) {
+    return {
+      season:
+        Number(match[1]),
+
+      episode:
+        Number(match[2])
+    };
+  }
+
+  return null;
+}
+
+
+function cleanTitle(
+  filename,
+  caption
+) {
+  let title =
+    filename ||
+    caption ||
+    "Untitled";
+
+  title =
+    title
+      .replace(
+        /\.(mkv|mp4|avi|mov|webm|ts|m4v)$/i,
+        ""
+      );
+
+  title =
+    title.replace(
+      /[._]+/g,
+      " "
+    );
+
+  title =
+    title.replace(
+      /\bS\d{1,2}E\d{1,3}\b/gi,
+      ""
+    );
+
+  title =
+    title.replace(
+      /\b\d{1,2}x\d{1,3}\b/gi,
+      ""
+    );
+
+  title =
+    title.replace(
+      /\b(2160p|1080p|720p|480p|4K|8K)\b/gi,
+      ""
+    );
+
+  title =
+    title.replace(
+      /\b(WEB[- ]?DL|WEB[- ]?Rip|Blu[- ]?Ray|BRRip|HDR|HEVC|H\.?265|H\.?264|x265|x264)\b/gi,
+      ""
+    );
+
+  title =
+    title.replace(
+      /\b(10bit|8bit|5\.1|7\.1|AAC|AC3|DTS)\b/gi,
+      ""
+    );
+
+  title =
+    title.replace(
+      /\s+/g,
+      " "
+    );
+
+  return title.trim();
+}
+
+
+function detectType(
+  filename,
+  caption
+) {
+  const text =
+    `${filename || ""} ${caption || ""}`;
+
   if (
-    /s\d{1,2}e\d{1,2}/i.test(
-      title
-    ) ||
-    /season|episode|series/i.test(
-      title
-    )
+    /\bS\d{1,2}E\d{1,3}\b/i.test(text) ||
+    /\b\d{1,2}x\d{1,3}\b/i.test(text) ||
+    /\bseason\s*\d+\b/i.test(text) ||
+    /\bepisode\s*\d+\b/i.test(text)
   ) {
     return "series";
   }
@@ -147,63 +278,293 @@ function getType(title) {
   return "movie";
 }
 
-/* -------------------------------------------------
-   YEAR
-------------------------------------------------- */
 
-function getYear(title) {
-  const match =
-    title.match(
-      /\b(19|20)\d{2}\b/
-    );
-
-  return match
-    ? Number(match[0])
-    : null;
+function getMime(
+  document
+) {
+  return (
+    document?.mimeType ||
+    "application/octet-stream"
+  );
 }
 
-/* -------------------------------------------------
-   CREATED DATE
-------------------------------------------------- */
 
 function getCreatedAt(
   message
 ) {
-  try {
-    if (
-      message?.date instanceof
-      Date
-    ) {
-      return message.date
-        .toISOString();
-    }
-
-    if (message?.date) {
+  if (
+    message?.date
+  ) {
+    try {
       return new Date(
-        Number(
-          message.date
-        ) * 1000
+        Number(message.date) *
+          1000
       ).toISOString();
-    }
-  } catch {
-    return null;
+    } catch {}
   }
 
   return null;
 }
 
-/* -------------------------------------------------
-   INDEX ONE MESSAGE
-------------------------------------------------- */
+
+// ======================================================
+// TPDB
+// ======================================================
+
+async function getTPDBMetadata(
+  filename,
+  title,
+  year,
+  existingChecked
+) {
+  if (
+    existingChecked
+  ) {
+    return null;
+  }
+
+  const searchName =
+    filename ||
+    title;
+
+  try {
+    const result =
+      await searchTPDB(
+        searchName,
+        year
+      );
+
+    return result;
+
+  } catch (error) {
+    console.error(
+      "TPDB lookup failed:",
+      error.message
+    );
+
+    return null;
+  }
+}
+
+
+// ======================================================
+// UPSERT
+// ======================================================
+
+function saveMedia(
+  data
+) {
+  const existing =
+    db.prepare(`
+      SELECT
+        id,
+        tpdb_checked
+      FROM media
+      WHERE message_id = ?
+    `).get(
+      data.messageId
+    );
+
+  if (!existing) {
+
+    const insert =
+      db.prepare(`
+        INSERT INTO media (
+          message_id,
+          title,
+          year,
+          type,
+          filename,
+          mime,
+          size,
+          width,
+          height,
+          caption,
+          thumb,
+          created_at,
+          indexed_at,
+
+          tpdb_id,
+          tpdb_title,
+          tpdb_description,
+          tpdb_poster,
+          tpdb_background,
+          tpdb_year,
+          tpdb_studio,
+          tpdb_performers,
+          tpdb_tags,
+          tpdb_type,
+          tpdb_checked
+        )
+        VALUES (
+          @messageId,
+          @title,
+          @year,
+          @type,
+          @filename,
+          @mime,
+          @size,
+          @width,
+          @height,
+          @caption,
+          @thumb,
+          @createdAt,
+          @indexedAt,
+
+          @tpdbId,
+          @tpdbTitle,
+          @tpdbDescription,
+          @tpdbPoster,
+          @tpdbBackground,
+          @tpdbYear,
+          @tpdbStudio,
+          @tpdbPerformers,
+          @tpdbTags,
+          @tpdbType,
+          @tpdbChecked
+        )
+      `);
+
+    insert.run(
+      data
+    );
+
+    return;
+  }
+
+
+  const update =
+    db.prepare(`
+      UPDATE media
+      SET
+        title = @title,
+        year = @year,
+        type = @type,
+        filename = @filename,
+        mime = @mime,
+        size = @size,
+        width = @width,
+        height = @height,
+        caption = @caption,
+        thumb = @thumb,
+        created_at = @createdAt,
+        indexed_at = @indexedAt,
+
+        tpdb_id = COALESCE(
+          @tpdbId,
+          tpdb_id
+        ),
+
+        tpdb_title = COALESCE(
+          @tpdbTitle,
+          tpdb_title
+        ),
+
+        tpdb_description = COALESCE(
+          @tpdbDescription,
+          tpdb_description
+        ),
+
+        tpdb_poster = COALESCE(
+          @tpdbPoster,
+          tpdb_poster
+        ),
+
+        tpdb_background = COALESCE(
+          @tpdbBackground,
+          tpdb_background
+        ),
+
+        tpdb_year = COALESCE(
+          @tpdbYear,
+          tpdb_year
+        ),
+
+        tpdb_studio = COALESCE(
+          @tpdbStudio,
+          tpdb_studio
+        ),
+
+        tpdb_performers = COALESCE(
+          @tpdbPerformers,
+          tpdb_performers
+        ),
+
+        tpdb_tags = COALESCE(
+          @tpdbTags,
+          tpdb_tags
+        ),
+
+        tpdb_type = COALESCE(
+          @tpdbType,
+          tpdb_type
+        ),
+
+        tpdb_checked =
+          CASE
+            WHEN @tpdbChecked = 1
+            THEN 1
+            ELSE tpdb_checked
+          END
+
+      WHERE message_id =
+        @messageId
+    `);
+
+  update.run(
+    data
+  );
+}
+
+
+// ======================================================
+// THUMBNAIL INFO
+// ======================================================
+
+function getThumbInfo(
+  document
+) {
+  const thumbs =
+    document?.thumbs || [];
+
+  if (
+    !thumbs.length
+  ) {
+    return null;
+  }
+
+  const thumb =
+    thumbs[
+      thumbs.length - 1
+    ];
+
+  return {
+    type:
+      thumb?.type ||
+      null,
+
+    width:
+      Number(
+        thumb?.w || 0
+      ) || null,
+
+    height:
+      Number(
+        thumb?.h || 0
+      ) || null
+  };
+}
+
+
+// ======================================================
+// INDEX ONE MESSAGE
+// ======================================================
 
 export async function indexSingleMessage(
   message
 ) {
-  const db =
-    getDb();
-
   if (!message) {
-    return false;
+    return null;
   }
 
   const messageId =
@@ -212,7 +573,7 @@ export async function indexSingleMessage(
     );
 
   if (!messageId) {
-    return false;
+    return null;
   }
 
   const document =
@@ -221,95 +582,94 @@ export async function indexSingleMessage(
     );
 
   if (!document) {
-    console.log(
-      `Message ${messageId} has no document media. Skipping.`
-    );
-
-    return false;
+    return null;
   }
 
   const filename =
-    getFilename(
-      document
+    cleanText(
+      getFilename(
+        document,
+        message
+      )
     );
 
-  const dimensions =
-    getDimensions(
-      document
+  const caption =
+    cleanText(
+      message.message ||
+      ""
     );
 
   const title =
-    getTitle(
-      message,
-      filename
+    cleanTitle(
+      filename,
+      caption
+    );
+
+  const year =
+    extractYear(
+      `${filename} ${caption}`
     );
 
   const type =
-    getType(title);
-
-  const year =
-    getYear(title);
-
-  const caption =
-    message.message ||
-    "";
-
-  const mime =
-    document.mimeType ||
-    "video/mp4";
-
-  const size =
-    Number(
-      document.size || 0
+    detectType(
+      filename,
+      caption
     );
 
-  const insert =
+  const episode =
+    extractEpisode(
+      `${filename} ${caption}`
+    );
+
+  const video =
+    getVideoInfo(
+      document
+    );
+
+  const thumb =
+    getThumbInfo(
+      document
+    );
+
+  const existing =
     db.prepare(`
-      INSERT INTO media (
-        message_id,
+      SELECT
+        tpdb_checked
+      FROM media
+      WHERE message_id = ?
+    `).get(
+      messageId
+    );
+
+  let tpdb = null;
+
+  if (
+    !existing ||
+    Number(
+      existing.tpdb_checked
+    ) !== 1
+  ) {
+    console.log(
+      `Searching TPDB for: ${filename}`
+    );
+
+    tpdb =
+      await getTPDBMetadata(
+        filename,
         title,
         year,
-        type,
-        filename,
-        mime,
-        size,
-        width,
-        height,
-        caption,
-        created_at,
-        indexed_at
-      )
-      VALUES (
-        @message_id,
-        @title,
-        @year,
-        @type,
-        @filename,
-        @mime,
-        @size,
-        @width,
-        @height,
-        @caption,
-        @created_at,
-        @indexed_at
-      )
-      ON CONFLICT(message_id)
-      DO UPDATE SET
-        title = excluded.title,
-        year = excluded.year,
-        type = excluded.type,
-        filename = excluded.filename,
-        mime = excluded.mime,
-        size = excluded.size,
-        width = excluded.width,
-        height = excluded.height,
-        caption = excluded.caption,
-        indexed_at = excluded.indexed_at
-    `);
+        false
+      );
+  }
 
-  insert.run({
-    message_id:
-      messageId,
+  const indexedAt =
+    new Date().toISOString();
+
+  const tpdbChecked =
+    1;
+
+  const data = {
+    messageId,
 
     title,
 
@@ -319,92 +679,178 @@ export async function indexSingleMessage(
 
     filename,
 
-    mime,
+    mime:
+      getMime(
+        document
+      ),
 
-    size,
+    size:
+      Number(
+        document.size || 0
+      ),
 
     width:
-      dimensions.width,
+      video.width ||
+      thumb?.width ||
+      null,
 
     height:
-      dimensions.height,
+      video.height ||
+      thumb?.height ||
+      null,
 
     caption,
 
-    created_at:
+    thumb:
+      thumb
+        ? JSON.stringify(
+            thumb
+          )
+        : null,
+
+    createdAt:
       getCreatedAt(
         message
       ),
 
-    indexed_at:
-      new Date()
-        .toISOString()
-  });
+    indexedAt,
 
-  /*
-    Update the highest known message ID.
-  */
+    tpdbId:
+      tpdb?.tpdbId ||
+      null,
 
-  const currentLastId =
-    Number(
-      getState(
-        "last_message_id"
-      ) || 0
-    );
+    tpdbTitle:
+      tpdb?.title ||
+      null,
 
-  if (
-    messageId >
-    currentLastId
-  ) {
-    setState(
-      "last_message_id",
-      messageId
-    );
-  }
+    tpdbDescription:
+      tpdb?.description ||
+      null,
 
-  console.log(
-    `Indexed realtime message: ${messageId} | ${title}`
+    tpdbPoster:
+      tpdb?.poster ||
+      null,
+
+    tpdbBackground:
+      tpdb?.background ||
+      null,
+
+    tpdbYear:
+      tpdb?.year ||
+      null,
+
+    tpdbStudio:
+      tpdb?.studio ||
+      null,
+
+    tpdbPerformers:
+      tpdb
+        ? JSON.stringify(
+            tpdb.performers ||
+            []
+          )
+        : null,
+
+    tpdbTags:
+      tpdb
+        ? JSON.stringify(
+            tpdb.tags ||
+            []
+          )
+        : null,
+
+    tpdbType:
+      tpdb?.tpdbType ||
+      null,
+
+    tpdbChecked
+  };
+
+
+  saveMedia(
+    data
   );
 
-  return true;
+
+  console.log(
+    [
+      `Indexed ${messageId}`,
+      `title="${title}"`,
+      `type=${type}`,
+      episode
+        ? `S${String(
+            episode.season
+          ).padStart(2, "0")}E${String(
+            episode.episode
+          ).padStart(2, "0")}`
+        : "",
+      tpdb
+        ? `TPDB="${tpdb.title}"`
+        : "TPDB=no-match"
+    ]
+      .filter(Boolean)
+      .join(" | ")
+  );
+
+
+  return data;
 }
 
-/* -------------------------------------------------
-   FULL / INCREMENTAL CATCH-UP INDEX
-------------------------------------------------- */
+
+// ======================================================
+// FULL TELEGRAM INDEX
+// ======================================================
 
 export async function indexTelegram() {
-  const db =
-    getDb();
-
-  const storedLastId =
+  const lastMessageId =
     Number(
       getState(
         "last_message_id"
       ) || 0
     );
 
-  console.log(
-    `Last indexed Telegram message ID: ${storedLastId}`
-  );
+  const firstRun =
+    !lastMessageId;
 
   const limit =
-    storedLastId > 0
-      ? 1000
-      : 10000;
+    firstRun
+      ? 10000
+      : 1000;
+
+  console.log(
+    "======================================"
+  );
+
+  console.log(
+    "Telegram indexing started"
+  );
+
+  console.log(
+    `Last message ID: ${lastMessageId}`
+  );
+
+  console.log(
+    `Mode: ${
+      firstRun
+        ? "FIRST RUN"
+        : "INCREMENTAL"
+    }`
+  );
+
+  console.log(
+    "======================================"
+  );
+
 
   const messages =
     await iterateMessages(
       limit,
-      storedLastId
+      lastMessageId
     );
 
-  console.log(
-    `Messages returned for indexing: ${messages.length}`
-  );
 
   if (
-    messages.length === 0
+    !messages.length
   ) {
     console.log(
       "No new Telegram media found."
@@ -413,20 +859,28 @@ export async function indexTelegram() {
     return;
   }
 
-  let indexed = 0;
-
-  let skipped = 0;
 
   let highestMessageId =
-    storedLastId;
+    lastMessageId;
 
-  /*
-    Process messages one by one.
-    This is safer for realtime updates.
-  */
+
+  // Telegram iterator is normally
+  // newest -> oldest, so process
+  // oldest -> newest.
+
+  messages.sort(
+    (
+      a,
+      b
+    ) =>
+      Number(a.id) -
+      Number(b.id)
+  );
+
 
   for (
-    const message of messages
+    const message
+    of messages
   ) {
     try {
       const messageId =
@@ -442,31 +896,22 @@ export async function indexTelegram() {
           messageId;
       }
 
-      const success =
-        await indexSingleMessage(
-          message
-        );
+      await indexSingleMessage(
+        message
+      );
 
-      if (success) {
-        indexed++;
-      } else {
-        skipped++;
-      }
     } catch (error) {
-      skipped++;
-
       console.error(
-        `Failed to index message ${
-          message?.id
-        }:`,
-        error.message
+        `Failed indexing message ${message?.id}:`,
+        error
       );
     }
   }
 
+
   if (
     highestMessageId >
-    storedLastId
+    lastMessageId
   ) {
     setState(
       "last_message_id",
@@ -474,51 +919,56 @@ export async function indexTelegram() {
     );
   }
 
-  const result =
-    db
-      .prepare(
-        "SELECT COUNT(*) AS count FROM media"
-      )
-      .get();
 
   console.log(
-    `Indexed this run: ${indexed}`
+    "======================================"
   );
 
   console.log(
-    `Skipped this run: ${skipped}`
+    `Telegram indexing completed. Processed ${messages.length} messages.`
   );
 
   console.log(
-    `Database contains ${result.count} media items`
+    `New last message ID: ${highestMessageId}`
   );
 
   console.log(
-    `Last indexed message ID: ${highestMessageId}`
+    "======================================"
   );
-
-  return result.count;
 }
 
-/* -------------------------------------------------
-   DIRECT EXECUTION
-------------------------------------------------- */
 
-if (
-  process.argv[1]?.endsWith(
-    "indexer.js"
-  )
-) {
+// ======================================================
+// DIRECT EXECUTION
+// ======================================================
+
+const isDirectRun =
+  process.argv[1] &&
+  process.argv[1]
+    .replace(/\\/g, "/")
+    .endsWith(
+      "/src/indexer.js"
+    );
+
+if (isDirectRun) {
   indexTelegram()
-    .then(() => {
-      process.exit(0);
-    })
-    .catch((error) => {
-      console.error(
-        "Indexing failed:",
-        error
-      );
+    .then(
+      async () => {
+        const client =
+          await getClient();
 
-      process.exit(1);
-    });
+        await client.disconnect();
+
+        process.exit(0);
+      }
+    )
+    .catch(
+      error => {
+        console.error(
+          error
+        );
+
+        process.exit(1);
+      }
+    );
 }
