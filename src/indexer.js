@@ -30,7 +30,7 @@ const db = getDb();
 // logic changes. Existing media will then be searched again.
 //
 
-const TPDB_PARSER_VERSION = 2;
+const TPDB_PARSER_VERSION = 3;
 
 
 // ======================================================
