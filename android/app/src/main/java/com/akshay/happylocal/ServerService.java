@@ -23,12 +23,18 @@ public class ServerService extends Service {
                 try {
                     Python py = Python.getInstance();
                     PyObject m = py.getModule("server");
-                    String channel = getSharedPreferences("host", MODE_PRIVATE)
-                        .getString("channel", "");
-                    String token = getSharedPreferences("host", MODE_PRIVATE)
-                        .getString("tpdb", "");
+                    android.content.SharedPreferences p =
+                        getSharedPreferences("host", MODE_PRIVATE);
+                    String apiId = p.getString("apiId", "");
+                    String apiHash = p.getString("apiHash", "");
+                    String phone = p.getString("phone", "");
+                    String channel = p.getString("channel", "");
+                    String token = p.getString("tpdb", "");
                     m.callAttr("start_server",
                         getFilesDir().getAbsolutePath(),
+                        apiId,
+                        apiHash,
+                        phone,
                         channel,
                         token,
                         8765);
