@@ -1657,15 +1657,19 @@ function makeMeta(
     row.tpdb_background
   ) {
 
-    meta.background =
-      row.tpdb_background;
+    const rawBackground =
+      typeof row.tpdb_background === "string"
+        ? row.tpdb_background.trim()
+        : "";
 
-  } else if (
-    row.tpdb_poster
-  ) {
+    const validBackground =
+      /^https?:\\/\\//i.test(rawBackground) &&
+      rawBackground !== "[object Object]";
 
     meta.background =
-      `${baseUrl}/poster/${row.id}`;
+      validBackground
+        ? rawBackground
+        : `${baseUrl}/poster/${row.id}`;
   }
 
 
