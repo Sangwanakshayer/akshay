@@ -1623,11 +1623,18 @@ function makeMeta(
     row.tpdb_poster
   ) {
 
-    meta.poster =
+    const posterUrl =
       `${baseUrl}/poster/${row.id}`;
+
+    meta.poster =
+      posterUrl;
 
     meta.posterShape =
       "poster";
+
+    // Nuvio hero/catalog artwork
+    meta.banner =
+      posterUrl;
   }
 
 
