@@ -13,6 +13,9 @@ public class MainActivity extends Activity {
 
     @Override public void onCreate(Bundle b) {
         super.onCreate(b);
+        if (!com.chaquo.python.Python.isStarted()) {
+            com.chaquo.python.Python.start(new com.chaquo.python.android.AndroidPlatform(this));
+        }
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -84,6 +87,10 @@ public class MainActivity extends Activity {
             .putString("apiHash", apiHash.getText().toString().trim())
             .putString("phone", phone.getText().toString().trim())
             .putString("code", code.getText().toString().trim())
+            .putString("channel", channel.getText().toString().trim())
+            .putString("tpdb", tpdbToken.getText().toString().trim())
+            .apply();
+        getSharedPreferences("host", MODE_PRIVATE).edit()
             .putString("channel", channel.getText().toString().trim())
             .putString("tpdb", tpdbToken.getText().toString().trim())
             .apply();
