@@ -1632,9 +1632,20 @@ function makeMeta(
     meta.posterShape =
       "poster";
 
-    // Nuvio hero/catalog artwork
+    // Explicit artwork fields for catalog + detail views
     meta.banner =
       posterUrl;
+
+    meta.background =
+      meta.background ||
+      posterUrl;
+
+    meta.app_extras = {
+      ...(meta.app_extras || {}),
+      poster: posterUrl,
+      background: meta.background,
+      banner: posterUrl
+    };
   }
 
 
