@@ -6,6 +6,7 @@ import path from "path";
 import { spawn } from "child_process";
 
 import ffmpegPath from "ffmpeg-static";
+import { Decoder } from "ebml";
 
 import { getDb } from "./db.js";
 
@@ -236,15 +237,12 @@ app.get(
   (req, res) => {
     res.json({
       ok: true,
-
       name:
         "Happy Telegram Media Addon",
-
       status:
         "running",
-
       version:
-        "1.1.0"
+        "1.2.0"
     });
   }
 );
@@ -276,6 +274,7 @@ app.get(
   "/catalog/:type/:id/:extra.json",
   (req, res) => {
     try {
+
       const extra =
         parseExtra(
           req.params.extra
@@ -326,6 +325,7 @@ app.get(
   "/catalog/:type/:id.json",
   (req, res) => {
     try {
+
       const rows =
         getCatalogRows(
           req.params.type,
@@ -485,226 +485,295 @@ app.get(
 
 
 /* =========================================================
-   GET VIDEO DURATION USING FFMPEG
+   MKV / EBML DURATION
 ========================================================= */
 
-async function getVideoDuration(
-  inputUrl
+async function getMkvDuration(
+  message
 ) {
-  return new Promise(
-    (resolve, reject) => {
 
-      const ffmpeg =
-        spawn(
-          ffmpegPath,
-          [
-            "-hide_banner",
+  /*
+   * We progressively inspect the beginning
+   * of the MKV file.
+   *
+   * Usually Matroska Info is near the beginning.
+   */
 
-            "-analyzeduration",
-            "5M",
+  const probeSizes = [
+    4 * 1024 * 1024,
+    16 * 1024 * 1024,
+    32 * 1024 * 1024
+  ];
 
-            "-probesize",
-            "10M",
+  let lastError = null;
 
-            "-i",
-            inputUrl,
 
-            "-f",
-            "null",
+  for (
+    const probeSize of probeSizes
+  ) {
 
-            "-"
-          ],
-          {
-            stdio: [
-              "ignore",
-              "ignore",
-              "pipe"
-            ]
-          }
+    try {
+
+      console.log(
+        `Probing MKV metadata: ${probeSize} bytes`
+      );
+
+
+      /*
+       * Download ONLY the requested
+       * beginning portion from Telegram.
+       */
+      const stream =
+        await streamMessage(
+          message,
+          0,
+          probeSize - 1
         );
 
-      let stderr = "";
 
-      let resolved =
-        false;
+      const chunks = [];
+
+      let total = 0;
 
 
-      const finish =
-        duration => {
+      for await (
+        const chunk of stream
+      ) {
 
-          if (resolved) {
-            return;
-          }
+        chunks.push(
+          Buffer.from(chunk)
+        );
 
-          resolved = true;
+        total +=
+          chunk.length;
 
-          try {
-            ffmpeg.kill(
-              "SIGKILL"
-            );
-          } catch {}
+        /*
+         * Safety limit.
+         */
+        if (
+          total >= probeSize
+        ) {
+          break;
+        }
+      }
 
-          resolve(
-            duration
+
+      if (
+        total === 0
+      ) {
+        throw new Error(
+          "No MKV data received"
+        );
+      }
+
+
+      const buffer =
+        Buffer.concat(
+          chunks
+        );
+
+
+      console.log(
+        `Received ${buffer.length} bytes for MKV probe`
+      );
+
+
+      /*
+       * Decode EBML.
+       */
+      const decoder =
+        new Decoder();
+
+
+      let elements;
+
+
+      try {
+
+        elements =
+          decoder.decode(
+            buffer
           );
-        };
+
+      } catch (decodeError) {
+
+        /*
+         * Truncated EBML is possible
+         * when metadata continues beyond
+         * current probe size.
+         *
+         * Continue with a larger probe.
+         */
+        lastError =
+          decodeError;
+
+        console.log(
+          `EBML decode incomplete at ${probeSize} bytes`
+        );
+
+        continue;
+      }
 
 
-      ffmpeg.stderr.on(
-        "data",
-        data => {
+      let timecodeScale =
+        1000000;
 
-          stderr +=
-            data.toString();
-
-          const match =
-            stderr.match(
-              /Duration:\s*(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)/i
-            );
+      let durationValue =
+        null;
 
 
-          if (!match) {
-            return;
-          }
+      for (
+        const element
+        of elements
+      ) {
+
+        if (
+          !element ||
+          !element[1]
+        ) {
+          continue;
+        }
 
 
-          const hours =
+        const info =
+          element[1];
+
+
+        if (
+          info.name ===
+          "TimecodeScale"
+        ) {
+
+          const value =
             Number(
-              match[1]
+              info.value
             );
-
-          const minutes =
-            Number(
-              match[2]
-            );
-
-          const seconds =
-            Number(
-              match[3]
-            );
-
-
-          const duration =
-            hours * 3600 +
-            minutes * 60 +
-            seconds;
-
 
           if (
-            duration > 0
+            Number.isFinite(
+              value
+            ) &&
+            value > 0
           ) {
-            finish(
-              duration
-            );
+
+            timecodeScale =
+              value;
           }
         }
-      );
 
 
-      ffmpeg.on(
-        "error",
-        error => {
+        if (
+          info.name ===
+          "Duration"
+        ) {
 
-          if (resolved) {
-            return;
-          }
-
-          resolved = true;
-
-          reject(
-            error
-          );
-        }
-      );
-
-
-      ffmpeg.on(
-        "close",
-        code => {
-
-          if (resolved) {
-            return;
-          }
-
-
-          const match =
-            stderr.match(
-              /Duration:\s*(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)/i
+          const value =
+            Number(
+              info.value
             );
 
+          if (
+            Number.isFinite(
+              value
+            ) &&
+            value > 0
+          ) {
 
-          if (match) {
-
-            const duration =
-              Number(match[1]) *
-                3600 +
-
-              Number(match[2]) *
-                60 +
-
-              Number(match[3]);
-
-
-            if (
-              duration > 0
-            ) {
-              finish(
-                duration
-              );
-
-              return;
-            }
+            durationValue =
+              value;
           }
-
-
-          resolved = true;
-
-          reject(
-            new Error(
-              `Could not determine video duration. FFmpeg code=${code}. ${stderr.slice(-1000)}`
-            )
-          );
         }
-      );
 
 
-      setTimeout(
-        () => {
+        /*
+         * Once both values are found,
+         * no need to parse further.
+         */
+        if (
+          durationValue !== null
+        ) {
+          break;
+        }
+      }
 
-          if (resolved) {
-            return;
-          }
 
-          resolved = true;
+      if (
+        durationValue !== null
+      ) {
 
-          try {
-            ffmpeg.kill(
-              "SIGKILL"
-            );
-          } catch {}
+        /*
+         * Matroska:
+         *
+         * Duration × TimecodeScale
+         * gives nanoseconds.
+         *
+         * Convert to seconds.
+         */
+        const durationSeconds =
+          (
+            durationValue *
+            timecodeScale
+          ) /
+          1000000000;
 
-          reject(
-            new Error(
-              "FFmpeg duration probe timed out"
-            )
+
+        if (
+          Number.isFinite(
+            durationSeconds
+          ) &&
+          durationSeconds > 0
+        ) {
+
+          console.log(
+            `MKV duration found: ${durationSeconds.toFixed(2)} seconds`
           );
 
-        },
-        15000
+          return durationSeconds;
+        }
+      }
+
+
+      lastError =
+        new Error(
+          "Duration element not found in current MKV probe"
+        );
+
+    } catch (error) {
+
+      lastError =
+        error;
+
+      console.error(
+        `MKV probe error at ${probeSize} bytes:`,
+        error.message
       );
     }
+  }
+
+
+  throw new Error(
+    `MKV duration could not be found. ${
+      lastError?.message ||
+      "Unknown error"
+    }`
   );
 }
 
 
 /* =========================================================
-   GENERATE 25% POSTER
+   GENERATE POSTER
 ========================================================= */
 
 async function generatePoster(
-  messageId,
+  message,
   inputUrl
 ) {
+
+  const messageId =
+    Number(
+      message.id
+    );
+
 
   const outputPath =
     path.join(
@@ -722,35 +791,32 @@ async function generatePoster(
     )
   ) {
 
+    console.log(
+      `Using cached poster: ${messageId}`
+    );
+
     return outputPath;
   }
 
 
-  console.log(
-    `Getting duration for message ${messageId}...`
-  );
-
-
   /*
-   * Ask FFmpeg for actual
-   * video duration.
+   * Get MKV duration.
    */
   const duration =
-    await getVideoDuration(
-      inputUrl
+    await getMkvDuration(
+      message
     );
 
 
   /*
-   * Select 25% position.
+   * 25% position.
    */
   let seekSeconds =
     duration * 0.25;
 
 
   /*
-   * Avoid exact beginning
-   * and exact end.
+   * Avoid first/last frame.
    */
   seekSeconds =
     Math.max(
@@ -767,10 +833,12 @@ async function generatePoster(
       seekSeconds / 3600
     );
 
+
   const minutes =
     Math.floor(
       (seekSeconds % 3600) / 60
     );
+
 
   const seconds =
     seekSeconds % 60;
@@ -791,7 +859,15 @@ async function generatePoster(
 
 
   console.log(
-    `Generating poster for ${messageId} at 25%: ${timestamp}`
+    `Generating poster for message ${messageId}`
+  );
+
+  console.log(
+    `Duration: ${duration.toFixed(2)} sec`
+  );
+
+  console.log(
+    `25% position: ${timestamp}`
   );
 
 
@@ -814,7 +890,8 @@ async function generatePoster(
             timestamp,
 
             /*
-             * Video URL.
+             * HTTP Range-enabled
+             * video endpoint.
              */
             "-i",
             inputUrl,
@@ -826,7 +903,7 @@ async function generatePoster(
             "1",
 
             /*
-             * Poster width.
+             * Poster size.
              */
             "-vf",
             "scale=600:-2",
@@ -899,7 +976,7 @@ async function generatePoster(
 
           reject(
             new Error(
-              `FFmpeg poster generation failed. code=${code}. ${stderr.slice(-1500)}`
+              `FFmpeg poster generation failed. code=${code}. ${stderr.slice(-2000)}`
             )
           );
         }
@@ -936,8 +1013,39 @@ app.get(
 
 
       /*
-       * Use actual Render URL.
+       * Get fresh Telegram message.
        */
+      const message =
+        await getMessage(
+          messageId
+        );
+
+
+      if (!message) {
+
+        return res
+          .status(404)
+          .send(
+            "Telegram message not found"
+          );
+      }
+
+
+      /*
+       * Must have a document.
+       */
+      if (
+        !message.media?.document
+      ) {
+
+        return res
+          .status(404)
+          .send(
+            "Telegram document not found"
+          );
+      }
+
+
       const baseUrl =
         getBaseUrl(req);
 
@@ -946,13 +1054,9 @@ app.get(
         `${baseUrl}/file/${messageId}`;
 
 
-      /*
-       * Generate or load
-       * cached poster.
-       */
       const posterPath =
         await generatePoster(
-          messageId,
+          message,
           inputUrl
         );
 
@@ -1017,8 +1121,7 @@ app.get(
 
 
 /* =========================================================
-   TELEGRAM VIDEO FILE
-   HTTP RANGE STREAMING
+   VIDEO FILE STREAM
 ========================================================= */
 
 app.get(
@@ -1090,7 +1193,7 @@ app.get(
 
 
       /*
-       * HTTP Range.
+       * Parse HTTP Range.
        */
       if (range) {
 
@@ -1199,8 +1302,8 @@ app.get(
 
 
       /*
-       * Stream only requested
-       * portion from Telegram.
+       * Stream requested portion
+       * directly from Telegram.
        */
       const stream =
         await streamMessage(
@@ -1264,7 +1367,7 @@ app.get(
 
 
 /* =========================================================
-   INDEX TELEGRAM
+   INITIAL INDEXING
 ========================================================= */
 
 async function ensureIndexed() {
