@@ -1,14 +1,12 @@
 import express from "express";
-import dotenv from "dotenv";
-
+import cors from "cors";
 import fs from "fs";
 import path from "path";
-import { spawn } from "child_process";
+import dotenv from "dotenv";
 
-import ffmpegPath from "ffmpeg-static";
-import { Decoder } from "ebml";
-
-import { getDb } from "./db.js";
+import {
+  getDb
+} from "./db.js";
 
 import {
   getMessage,
@@ -19,330 +17,181 @@ import {
   indexTelegram
 } from "./indexer.js";
 
+import {
+  generatePoster
+} from "./poster.js";
+
 dotenv.config();
 
 const app = express();
 
+app.use(cors());
+
+app.use(
+  express.json()
+);
+
 const PORT =
   Number(process.env.PORT) || 7000;
 
+const db =
+  getDb();
 
-/* =========================================================
-   POSTER CACHE
-========================================================= */
-
-const posterDir =
-  path.resolve("./data/posters");
-
-if (!fs.existsSync(posterDir)) {
-  fs.mkdirSync(
-    posterDir,
-    {
-      recursive: true
-    }
-  );
-}
-
-
-/* =========================================================
-   CORS
-========================================================= */
-
-app.use((req, res, next) => {
-  res.setHeader(
-    "Access-Control-Allow-Origin",
-    "*"
+const MANIFEST_PATH =
+  path.resolve(
+    "./manifest.json"
   );
 
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "*"
-  );
 
-  next();
-});
-
-
-/* =========================================================
-   BASE URL
-========================================================= */
+// ======================================================
+// BASE URL
+// ======================================================
 
 function getBaseUrl(req) {
-  return (
-    process.env.PUBLIC_BASE_URL ||
-    `${req.protocol}://${req.get("host")}`
-  );
-}
-
-
-/* =========================================================
-   DATABASE
-========================================================= */
-
-function getMediaById(id) {
-  const db =
-    getDb();
-
-  return db
-    .prepare(
-      "SELECT * FROM media WHERE id = ?"
-    )
-    .get(
-      Number(id)
-    );
-}
-
-
-/* =========================================================
-   META
-========================================================= */
-
-function makeMeta(row, req) {
-  const baseUrl =
-    getBaseUrl(req);
-
-  const posterUrl =
-    `${baseUrl}/poster/${row.message_id}`;
-
-  return {
-    id:
-      `tg:${row.id}`,
-
-    type:
-      row.type === "series"
-        ? "series"
-        : "movie",
-
-    name:
-      row.title ||
-      row.filename ||
-      `Telegram ${row.message_id}`,
-
-    poster:
-      posterUrl,
-
-    background:
-      posterUrl,
-
-    description:
-      row.caption || "",
-
-    year:
-      row.year || undefined,
-
-    streams: [
-      {
-        title:
-          "Play",
-
-        url:
-          `${baseUrl}/stream/${row.type}/tg:${row.id}.json`
-      }
-    ]
-  };
-}
-
-
-/* =========================================================
-   EXTRA PARSER
-========================================================= */
-
-function parseExtra(value) {
-  if (!value) {
-    return {};
+  if (
+    process.env.PUBLIC_BASE_URL
+  ) {
+    return process.env.PUBLIC_BASE_URL
+      .replace(/\/$/, "");
   }
 
-  try {
-    return JSON.parse(value);
-  } catch {
-    return {};
-  }
+  const forwardedProto =
+    req.headers["x-forwarded-proto"];
+
+  const protocol =
+    forwardedProto ||
+    req.protocol;
+
+  return `${protocol}://${req.get("host")}`;
 }
 
 
-/* =========================================================
-   CATALOG
-========================================================= */
-
-function getCatalogRows(
-  type,
-  search = "",
-  skip = 0
-) {
-  const db =
-    getDb();
-
-  const safeType =
-    type === "series"
-      ? "series"
-      : "movie";
-
-  const offset =
-    Math.max(
-      0,
-      Number(skip) || 0
-    );
-
-
-  if (search) {
-    const q =
-      `%${search}%`;
-
-    return db
-      .prepare(`
-        SELECT *
-        FROM media
-        WHERE type = ?
-        AND (
-          title LIKE ?
-          OR filename LIKE ?
-          OR caption LIKE ?
-        )
-        ORDER BY id DESC
-        LIMIT 100
-        OFFSET ?
-      `)
-      .all(
-        safeType,
-        q,
-        q,
-        q,
-        offset
-      );
-  }
-
-
-  return db
-    .prepare(`
-      SELECT *
-      FROM media
-      WHERE type = ?
-      ORDER BY id DESC
-      LIMIT 100
-      OFFSET ?
-    `)
-    .all(
-      safeType,
-      offset
-    );
-}
-
-
-/* =========================================================
-   HEALTH
-========================================================= */
+// ======================================================
+// ROOT
+// ======================================================
 
 app.get(
   "/",
   (req, res) => {
     res.json({
       ok: true,
-
-      name:
-        "Happy Telegram Media Addon",
-
-      status:
-        "running",
-
-      version:
-        "1.3.0"
+      name: "Happy Telegram Addon",
+      status: "running"
     });
   }
 );
 
 
-/* =========================================================
-   MANIFEST
-========================================================= */
+// ======================================================
+// MANIFEST
+// ======================================================
 
 app.get(
   "/manifest.json",
   (req, res) => {
-    res.sendFile(
-      "manifest.json",
-      {
-        root:
-          process.cwd()
-      }
-    );
-  }
-);
-
-
-/* =========================================================
-   CATALOG WITH EXTRA
-========================================================= */
-
-app.get(
-  "/catalog/:type/:id/:extra.json",
-  (req, res) => {
     try {
-
-      const extra =
-        parseExtra(
-          req.params.extra
-        );
-
-      const rows =
-        getCatalogRows(
-          req.params.type,
-          extra.search || "",
-          extra.skip || 0
-        );
-
-      const metas =
-        rows.map(
-          row =>
-            makeMeta(
-              row,
-              req
-            )
-        );
-
-      res.json({
-        metas
-      });
-
+      res.sendFile(
+        MANIFEST_PATH
+      );
     } catch (error) {
-
       console.error(
-        "Catalog error:",
+        "Manifest error:",
         error
       );
 
-      res.status(500).json({
-        metas: [],
-
-        error:
-          error.message
-      });
+      res
+        .status(500)
+        .json({
+          error:
+            "Manifest unavailable"
+        });
     }
   }
 );
 
 
-/* =========================================================
-   CATALOG WITHOUT EXTRA
-========================================================= */
+// ======================================================
+// CATALOG
+// ======================================================
 
 app.get(
   "/catalog/:type/:id.json",
   (req, res) => {
     try {
+      const type =
+        req.params.type;
 
-      const rows =
-        getCatalogRows(
-          req.params.type,
-          "",
-          0
+      const catalogId =
+        req.params.id;
+
+      const search =
+        String(
+          req.query.search || ""
+        ).trim();
+
+      const skip =
+        Math.max(
+          0,
+          Number(
+            req.query.skip || 0
+          )
         );
+
+      const limit =
+        100;
+
+      let rows;
+
+      if (search) {
+        rows =
+          db.prepare(`
+            SELECT *
+            FROM media
+            WHERE type = ?
+              AND (
+                title LIKE ?
+                OR filename LIKE ?
+                OR caption LIKE ?
+              )
+            ORDER BY
+              COALESCE(year, 0) DESC,
+              id DESC
+            LIMIT ?
+            OFFSET ?
+          `).all(
+            type,
+            `%${search}%`,
+            `%${search}%`,
+            `%${search}%`,
+            limit,
+            skip
+          );
+      } else {
+        rows =
+          db.prepare(`
+            SELECT *
+            FROM media
+            WHERE type = ?
+            ORDER BY
+              id DESC
+            LIMIT ?
+            OFFSET ?
+          `).all(
+            type,
+            limit,
+            skip
+          );
+      }
+
+      const baseUrl =
+        getBaseUrl(req);
 
       const metas =
         rows.map(
           row =>
             makeMeta(
               row,
-              req
+              baseUrl
             )
         );
 
@@ -351,96 +200,236 @@ app.get(
       });
 
     } catch (error) {
-
       console.error(
         "Catalog error:",
         error
       );
 
-      res.status(500).json({
-        metas: [],
-
-        error:
-          error.message
-      });
+      res
+        .status(500)
+        .json({
+          metas: []
+        });
     }
   }
 );
 
 
-/* =========================================================
-   META
-========================================================= */
+// ======================================================
+// META
+// ======================================================
 
 app.get(
   "/meta/:type/:id.json",
   (req, res) => {
     try {
-
       const rawId =
-        req.params.id.replace(
-          /^tg:/,
-          ""
+        String(
+          req.params.id
         );
 
+      const numericId =
+        rawId.startsWith("tg:")
+          ? Number(
+              rawId.substring(3)
+            )
+          : Number(rawId);
+
+      if (!numericId) {
+        return res
+          .status(400)
+          .json({
+            error:
+              "Invalid media ID"
+          });
+      }
+
       const row =
-        getMediaById(
-          rawId
+        db.prepare(`
+          SELECT *
+          FROM media
+          WHERE id = ?
+        `).get(
+          numericId
         );
 
       if (!row) {
         return res
           .status(404)
           .json({
-            meta: null
+            error:
+              "Media not found"
           });
       }
+
+      const baseUrl =
+        getBaseUrl(req);
 
       res.json({
         meta:
           makeMeta(
             row,
-            req
+            baseUrl
           )
       });
 
     } catch (error) {
-
       console.error(
         "Meta error:",
         error
       );
 
-      res.status(500).json({
-        meta: null,
-
-        error:
-          error.message
-      });
+      res
+        .status(500)
+        .json({
+          error:
+            "Meta unavailable"
+        });
     }
   }
 );
 
 
-/* =========================================================
-   STREAM
-========================================================= */
+// ======================================================
+// POSTER
+// ======================================================
+
+app.get(
+  "/poster/:messageId",
+  async (req, res) => {
+    try {
+      const messageId =
+        Number(
+          req.params.messageId
+        );
+
+      if (!messageId) {
+        return res
+          .status(400)
+          .send(
+            "Invalid message ID"
+          );
+      }
+
+      const posterPath =
+        path.resolve(
+          "./data/posters",
+          `${messageId}.jpg`
+        );
+
+      // --------------------------------------------------
+      // CACHE HIT
+      // --------------------------------------------------
+
+      if (
+        fs.existsSync(
+          posterPath
+        )
+      ) {
+        res.setHeader(
+          "Content-Type",
+          "image/jpeg"
+        );
+
+        res.setHeader(
+          "Cache-Control",
+          "public, max-age=31536000, immutable"
+        );
+
+        return res.sendFile(
+          posterPath
+        );
+      }
+
+      // --------------------------------------------------
+      // GENERATE POSTER AT 02:30
+      // --------------------------------------------------
+
+      console.log(
+        `Poster not cached. Generating for message ${messageId}`
+      );
+
+      const generatedPath =
+        await generatePoster(
+          messageId
+        );
+
+      if (
+        !generatedPath ||
+        !fs.existsSync(
+          generatedPath
+        )
+      ) {
+        throw new Error(
+          "Poster file was not generated"
+        );
+      }
+
+      res.setHeader(
+        "Content-Type",
+        "image/jpeg"
+      );
+
+      res.setHeader(
+        "Cache-Control",
+        "public, max-age=31536000, immutable"
+      );
+
+      return res.sendFile(
+        generatedPath
+      );
+
+    } catch (error) {
+      console.error(
+        "Poster error:",
+        error
+      );
+
+      return res
+        .status(500)
+        .send(
+          "Poster generation failed"
+        );
+    }
+  }
+);
+
+
+// ======================================================
+// STREAM
+// ======================================================
 
 app.get(
   "/stream/:type/:id.json",
   async (req, res) => {
-
     try {
-
       const rawId =
-        req.params.id.replace(
-          /^tg:/,
-          ""
+        String(
+          req.params.id
         );
 
+      const numericId =
+        rawId.startsWith("tg:")
+          ? Number(
+              rawId.substring(3)
+            )
+          : Number(rawId);
+
+      if (!numericId) {
+        return res
+          .status(400)
+          .json({
+            streams: []
+          });
+      }
+
       const row =
-        getMediaById(
-          rawId
+        db.prepare(`
+          SELECT *
+          FROM media
+          WHERE id = ?
+        `).get(
+          numericId
         );
 
       if (!row) {
@@ -457,631 +446,57 @@ app.get(
       res.json({
         streams: [
           {
-            title:
+            name:
               row.title ||
               row.filename ||
-              "Play",
+              "Telegram",
+
+            title:
+              row.filename ||
+              row.title ||
+              "Telegram",
 
             url:
               `${baseUrl}/file/${row.message_id}`,
 
             behaviorHints: {
               notWebReady:
-                false
+                true
             }
           }
         ]
       });
 
     } catch (error) {
-
       console.error(
-        "Stream error:",
+        "Stream metadata error:",
         error
       );
 
-      res.status(500).json({
-        streams: [],
-
-        error:
-          error.message
-      });
+      res
+        .status(500)
+        .json({
+          streams: []
+        });
     }
   }
 );
 
 
-/* =========================================================
-   MKV DURATION
-========================================================= */
-
-async function getMkvDuration(
-  message
-) {
-
-  const probeSizes = [
-    4 * 1024 * 1024,
-    16 * 1024 * 1024,
-    32 * 1024 * 1024
-  ];
-
-  let lastError =
-    null;
-
-
-  for (
-    const probeSize
-    of probeSizes
-  ) {
-
-    try {
-
-      console.log(
-        `Probing MKV metadata: ${probeSize} bytes`
-      );
-
-
-      const stream =
-        await streamMessage(
-          message,
-          0,
-          probeSize - 1
-        );
-
-
-      const chunks = [];
-
-      let total = 0;
-
-
-      for await (
-        const chunk of stream
-      ) {
-
-        const buffer =
-          Buffer.from(chunk);
-
-        chunks.push(
-          buffer
-        );
-
-        total +=
-          buffer.length;
-
-
-        if (
-          total >= probeSize
-        ) {
-          break;
-        }
-      }
-
-
-      if (
-        total === 0
-      ) {
-
-        throw new Error(
-          "No MKV data received"
-        );
-      }
-
-
-      const buffer =
-        Buffer.concat(
-          chunks
-        );
-
-
-      console.log(
-        `Received ${buffer.length} bytes for MKV probe`
-      );
-
-
-      /*
-       * EBML decoder.
-       *
-       * ebml v3 uses a Transform
-       * stream and emits elements
-       * through "data".
-       */
-
-      const decoder =
-        new Decoder();
-
-      const elements = [];
-
-
-      decoder.on(
-        "data",
-        element => {
-
-          elements.push(
-            element
-          );
-        }
-      );
-
-
-      decoder.write(
-        buffer
-      );
-
-
-      /*
-       * Flush decoder.
-       */
-      if (
-        typeof decoder.end ===
-        "function"
-      ) {
-        decoder.end();
-      }
-
-
-      let timecodeScale =
-        1000000;
-
-      let durationValue =
-        null;
-
-
-      for (
-        const element
-        of elements
-      ) {
-
-        if (
-          !Array.isArray(
-            element
-          )
-        ) {
-          continue;
-        }
-
-
-        const info =
-          element[1];
-
-
-        if (!info) {
-          continue;
-        }
-
-
-        if (
-          info.name ===
-          "TimecodeScale"
-        ) {
-
-          const value =
-            Number(
-              info.value
-            );
-
-
-          if (
-            Number.isFinite(
-              value
-            ) &&
-            value > 0
-          ) {
-
-            timecodeScale =
-              value;
-          }
-        }
-
-
-        if (
-          info.name ===
-          "Duration"
-        ) {
-
-          const value =
-            Number(
-              info.value
-            );
-
-
-          if (
-            Number.isFinite(
-              value
-            ) &&
-            value > 0
-          ) {
-
-            durationValue =
-              value;
-
-
-            console.log(
-              "EBML Duration found:",
-              durationValue
-            );
-          }
-        }
-
-
-        if (
-          durationValue !==
-          null
-        ) {
-          break;
-        }
-      }
-
-
-      if (
-        durationValue !==
-        null
-      ) {
-
-        /*
-         * Matroska:
-         *
-         * Duration × TimecodeScale
-         * = nanoseconds.
-         */
-
-        const durationSeconds =
-          (
-            durationValue *
-            timecodeScale
-          ) /
-          1000000000;
-
-
-        if (
-          Number.isFinite(
-            durationSeconds
-          ) &&
-          durationSeconds > 0
-        ) {
-
-          console.log(
-            `MKV duration found: ${durationSeconds.toFixed(2)} seconds`
-          );
-
-
-          return durationSeconds;
-        }
-      }
-
-
-      lastError =
-        new Error(
-          "Duration element not found"
-        );
-
-
-      console.log(
-        `Duration not found in ${probeSize} bytes`
-      );
-
-    } catch (error) {
-
-      lastError =
-        error;
-
-
-      console.error(
-        `MKV probe error at ${probeSize} bytes:`,
-        error.message
-      );
-    }
-  }
-
-
-  throw new Error(
-    `MKV duration could not be found. ${
-      lastError?.message ||
-      "Unknown error"
-    }`
-  );
-}
-
-
-/* =========================================================
-   GENERATE POSTER
-========================================================= */
-
-async function generatePoster(
-  message,
-  inputUrl
-) {
-
-  const messageId =
-    Number(
-      message.id
-    );
-
-
-  const outputPath =
-    path.join(
-      posterDir,
-      `${messageId}.jpg`
-    );
-
-
-  /*
-   * Use cached poster.
-   */
-
-  if (
-    fs.existsSync(
-      outputPath
-    )
-  ) {
-
-    console.log(
-      `Using cached poster: ${messageId}`
-    );
-
-    return outputPath;
-  }
-
-
-  /*
-   * Get actual MKV duration.
-   */
-
-  const duration =
-    await getMkvDuration(
-      message
-    );
-
-
-  /*
-   * Select 25%.
-   */
-
-  let seekSeconds =
-    duration * 0.25;
-
-
-  /*
-   * Avoid first/last second.
-   */
-
-  seekSeconds =
-    Math.max(
-      1,
-      Math.min(
-        seekSeconds,
-        duration - 1
-      )
-    );
-
-
-  const hours =
-    Math.floor(
-      seekSeconds / 3600
-    );
-
-
-  const minutes =
-    Math.floor(
-      (seekSeconds % 3600) / 60
-    );
-
-
-  const seconds =
-    seekSeconds % 60;
-
-
-  const timestamp =
-    [
-      String(hours)
-        .padStart(
-          2,
-          "0"
-        ),
-
-      String(minutes)
-        .padStart(
-          2,
-          "0"
-        ),
-
-      seconds
-        .toFixed(2)
-        .padStart(
-          5,
-          "0"
-        )
-    ].join(":");
-
-
-  console.log(
-    `Generating poster for message ${messageId}`
-  );
-
-
-  console.log(
-    `Duration: ${duration.toFixed(2)} seconds`
-  );
-
-
-  console.log(
-    `25% position: ${timestamp}`
-  );
-
-
-  return new Promise(
-    (resolve, reject) => {
-
-      const args = [
-
-        "-hide_banner",
-
-        "-loglevel",
-        "error",
-
-        "-nostdin",
-
-        /*
-         * IMPORTANT:
-         *
-         * Input first.
-         * This avoids remote HTTP
-         * seeking problems.
-         */
-
-        "-i",
-        inputUrl,
-
-        /*
-         * Seek after input.
-         *
-         * FFmpeg reads sequentially
-         * until the requested point.
-         */
-
-        "-ss",
-        timestamp,
-
-        /*
-         * Extract exactly one frame.
-         */
-
-        "-frames:v",
-        "1",
-
-        /*
-         * Poster width.
-         */
-
-        "-vf",
-        "scale=600:-2",
-
-        /*
-         * JPEG quality.
-         */
-
-        "-q:v",
-        "3",
-
-        "-y",
-        outputPath
-      ];
-
-
-      console.log(
-        "Starting FFmpeg poster extraction..."
-      );
-
-
-      const ffmpeg =
-        spawn(
-          ffmpegPath,
-          args,
-          {
-            stdio: [
-              "ignore",
-              "ignore",
-              "pipe"
-            ]
-          }
-        );
-
-
-      let stderr =
-        "";
-
-
-      ffmpeg.stderr.on(
-        "data",
-        data => {
-
-          const text =
-            data.toString();
-
-          stderr +=
-            text;
-
-          console.log(
-            "FFmpeg:",
-            text.trim()
-          );
-        }
-      );
-
-
-      ffmpeg.on(
-        "error",
-        error => {
-
-          reject(
-            error
-          );
-        }
-      );
-
-
-      ffmpeg.on(
-        "close",
-        (
-          code,
-          signal
-        ) => {
-
-          console.log(
-            `FFmpeg closed. code=${code}, signal=${signal}`
-          );
-
-
-          if (
-            code === 0 &&
-            fs.existsSync(
-              outputPath
-            )
-          ) {
-
-            console.log(
-              `Poster generated successfully: ${messageId}`
-            );
-
-
-            resolve(
-              outputPath
-            );
-
-
-            return;
-          }
-
-
-          reject(
-            new Error(
-              `FFmpeg poster generation failed. code=${code}, signal=${signal}. ${stderr.slice(-3000)}`
-            )
-          );
-        }
-      );
-    }
-  );
-}
-
-
-/* =========================================================
-   POSTER ROUTE
-========================================================= */
+// ======================================================
+// FILE STREAM
+// ======================================================
 
 app.get(
-  "/poster/:messageId",
+  "/file/:messageId",
   async (req, res) => {
-
     try {
-
       const messageId =
         Number(
           req.params.messageId
         );
 
-
       if (!messageId) {
-
         return res
           .status(400)
           .send(
@@ -1089,19 +504,12 @@ app.get(
           );
       }
 
-
-      /*
-       * Get Telegram message.
-       */
-
       const message =
         await getMessage(
           messageId
         );
 
-
       if (!message) {
-
         return res
           .status(404)
           .send(
@@ -1109,15 +517,10 @@ app.get(
           );
       }
 
+      const document =
+        message?.media?.document;
 
-      /*
-       * Verify document.
-       */
-
-      if (
-        !message.media?.document
-      ) {
-
+      if (!document) {
         return res
           .status(404)
           .send(
@@ -1125,135 +528,12 @@ app.get(
           );
       }
 
-
-      const baseUrl =
-        getBaseUrl(req);
-
-
-      const inputUrl =
-        `${baseUrl}/file/${messageId}`;
-
-
-      /*
-       * Generate or load poster.
-       */
-
-      const posterPath =
-        await generatePoster(
-          message,
-          inputUrl
-        );
-
-
-      const stat =
-        fs.statSync(
-          posterPath
-        );
-
-
-      res.setHeader(
-        "Content-Type",
-        "image/jpeg"
-      );
-
-
-      res.setHeader(
-        "Content-Length",
-        stat.size
-      );
-
-
-      res.setHeader(
-        "Cache-Control",
-        "public, max-age=31536000, immutable"
-      );
-
-
-      fs.createReadStream(
-        posterPath
-      ).pipe(
-        res
-      );
-
-
-    } catch (error) {
-
-      console.error(
-        "Poster error:",
-        error
-      );
-
-
-      if (
-        !res.headersSent
-      ) {
-
-        res
-          .status(500)
-          .send(
-            `Poster generation failed: ${error.message}`
-          );
-
-      } else {
-
-        res.destroy();
-
-      }
-    }
-  }
-);
-
-
-/* =========================================================
-   TELEGRAM VIDEO FILE
-   HTTP RANGE STREAMING
-========================================================= */
-
-app.get(
-  "/file/:messageId",
-  async (req, res) => {
-
-    try {
-
-      const messageId =
-        Number(
-          req.params.messageId
-        );
-
-
-      const message =
-        await getMessage(
-          messageId
-        );
-
-
-      if (!message) {
-
-        return res
-          .status(404)
-          .send(
-            "Telegram message not found"
-          );
-      }
-
-
-      const media =
-        message.media;
-
-
-      const document =
-        media?.document;
-
-
       const fileSize =
         Number(
-          document?.size ||
-          0
+          document.size || 0
         );
 
-
       if (!fileSize) {
-
         return res
           .status(500)
           .send(
@@ -1261,126 +541,200 @@ app.get(
           );
       }
 
-
       const mime =
-        document?.mimeType ||
-        "video/x-matroska";
+        document.mimeType ||
+        "application/octet-stream";
 
+
+      // ==================================================
+      // RANGE REQUEST
+      // ==================================================
 
       const range =
         req.headers.range;
 
+      if (!range) {
 
-      let start = 0;
+        res.status(200);
 
-      let end =
-        fileSize - 1;
+        res.setHeader(
+          "Content-Type",
+          mime
+        );
 
+        res.setHeader(
+          "Content-Length",
+          fileSize
+        );
 
-      /*
-       * Parse Range.
-       */
+        res.setHeader(
+          "Accept-Ranges",
+          "bytes"
+        );
 
-      if (range) {
+        res.setHeader(
+          "Cache-Control",
+          "no-cache"
+        );
 
-        const match =
-          range.match(
-            /bytes=(\d*)-(\d*)/
+        const iterator =
+          await streamMessage(
+            message,
+            0,
+            fileSize - 1
           );
 
-
-        if (match) {
-
-          if (
-            match[1]
+        try {
+          for await (
+            const chunk of iterator
           ) {
-
-            start =
-              Number(
-                match[1]
+            if (
+              !res.write(chunk)
+            ) {
+              await new Promise(
+                resolve =>
+                  res.once(
+                    "drain",
+                    resolve
+                  )
               );
+            }
           }
 
+          res.end();
+
+        } catch (error) {
+          console.error(
+            "Full stream error:",
+            error
+          );
 
           if (
-            match[2]
+            !res.headersSent
           ) {
-
-            end =
-              Number(
-                match[2]
-              );
+            res
+              .status(500)
+              .end();
+          } else {
+            res.destroy();
           }
         }
+
+        return;
       }
 
 
-      /*
-       * Invalid range.
-       */
+      // ==================================================
+      // PARSE RANGE
+      // ==================================================
+
+      const match =
+        range.match(
+          /bytes=(\d*)-(\d*)/
+        );
+
+      if (!match) {
+        return res
+          .status(416)
+          .set(
+            "Content-Range",
+            `bytes */${fileSize}`
+          )
+          .end();
+      }
+
+      let start =
+        match[1]
+          ? Number(match[1])
+          : null;
+
+      let end =
+        match[2]
+          ? Number(match[2])
+          : null;
+
+
+      // bytes=-500000
+      if (
+        start === null &&
+        end !== null
+      ) {
+        const suffixLength =
+          end;
+
+        start =
+          Math.max(
+            0,
+            fileSize -
+              suffixLength
+          );
+
+        end =
+          fileSize - 1;
+      }
+
+      // bytes=500000-
+      if (
+        start !== null &&
+        end === null
+      ) {
+        end =
+          fileSize - 1;
+      }
 
       if (
-        start >= fileSize ||
-        end >= fileSize ||
-        start > end
+        start === null ||
+        end === null ||
+        start < 0 ||
+        end < start ||
+        start >= fileSize
       ) {
-
-        res.status(
-          416
-        );
-
-
-        res.setHeader(
-          "Content-Range",
-          `bytes */${fileSize}`
-        );
-
-
-        return res.end();
+        return res
+          .status(416)
+          .set(
+            "Content-Range",
+            `bytes */${fileSize}`
+          )
+          .end();
       }
 
+      end =
+        Math.min(
+          end,
+          fileSize - 1
+        );
 
       const contentLength =
-        end - start + 1;
+        end -
+        start +
+        1;
 
 
-      if (range) {
+      // ==================================================
+      // PARTIAL RESPONSE
+      // ==================================================
 
-        res.status(
-          206
-        );
-
-
-        res.setHeader(
-          "Content-Range",
-          `bytes ${start}-${end}/${fileSize}`
-        );
-
-      } else {
-
-        res.status(
-          200
-        );
-      }
-
+      res.status(206);
 
       res.setHeader(
         "Content-Type",
         mime
       );
 
-
       res.setHeader(
         "Content-Length",
         contentLength
       );
 
+      res.setHeader(
+        "Content-Range",
+        `bytes ${start}-${end}/${fileSize}`
+      );
 
       res.setHeader(
         "Accept-Ranges",
         "bytes"
       );
-
 
       res.setHeader(
         "Cache-Control",
@@ -1388,120 +742,203 @@ app.get(
       );
 
 
-      /*
-       * Telegram → HTTP stream.
-       */
+      // ==================================================
+      // TELEGRAM STREAM
+      // ==================================================
 
-      const stream =
+      console.log(
+        `HTTP range request: ${start}-${end}/${fileSize}`
+      );
+
+      const iterator =
         await streamMessage(
           message,
           start,
           end
         );
 
-
-      for await (
-        const chunk of stream
-      ) {
-
-        if (
-          res.destroyed
+      try {
+        for await (
+          const chunk of iterator
         ) {
-          break;
+          if (
+            !res.write(chunk)
+          ) {
+            await new Promise(
+              resolve =>
+                res.once(
+                  "drain",
+                  resolve
+                )
+            );
+          }
         }
 
-
-        res.write(
-          chunk
-        );
-      }
-
-
-      if (
-        !res.destroyed
-      ) {
-
         res.end();
-      }
 
+      } catch (error) {
+        console.error(
+          "Range stream error:",
+          error
+        );
+
+        res.destroy();
+      }
 
     } catch (error) {
-
       console.error(
-        "File streaming error:",
+        "File endpoint error:",
         error
       );
-
 
       if (
         !res.headersSent
       ) {
-
         res
           .status(500)
           .send(
-            `Streaming error: ${error.message}`
+            "File streaming failed"
           );
-
       } else {
-
         res.destroy();
-
       }
     }
   }
 );
 
 
-/* =========================================================
-   INITIAL TELEGRAM INDEXING
-========================================================= */
+// ======================================================
+// MAKE META
+// ======================================================
+
+function makeMeta(
+  row,
+  baseUrl
+) {
+  const posterUrl =
+    `${baseUrl}/poster/${row.message_id}`;
+
+  const streamUrl =
+    `${baseUrl}/file/${row.message_id}`;
+
+  const type =
+    row.type === "series"
+      ? "series"
+      : "movie";
+
+  const meta = {
+    id:
+      `tg:${row.id}`,
+
+    type,
+
+    name:
+      row.title ||
+      row.filename ||
+      `Telegram ${row.message_id}`,
+
+    poster:
+      posterUrl,
+
+    background:
+      posterUrl,
+
+    description:
+      row.caption ||
+      row.filename ||
+      "",
+
+    year:
+      row.year ||
+      undefined,
+
+    releaseInfo:
+      row.year
+        ? String(row.year)
+        : undefined,
+
+    runtime:
+      undefined,
+
+    website:
+      undefined,
+
+    videos:
+      undefined,
+
+    behaviorHints: {
+      defaultVideoId:
+        `tg:${row.id}`
+    },
+
+    links: [],
+
+    streams: [
+      {
+        name:
+          row.title ||
+          row.filename ||
+          "Telegram",
+
+        title:
+          row.filename ||
+          row.title ||
+          "Telegram",
+
+        url:
+          streamUrl,
+
+        behaviorHints: {
+          notWebReady: true
+        }
+      }
+    ]
+  };
+
+  // Remove undefined fields
+  return JSON.parse(
+    JSON.stringify(meta)
+  );
+}
+
+
+// ======================================================
+// STARTUP INDEX
+// ======================================================
 
 async function ensureIndexed() {
-
-  console.log(
-    "Checking Telegram for new media..."
-  );
-
-
   try {
+    console.log(
+      "Checking Telegram index..."
+    );
 
     await indexTelegram();
 
-
     console.log(
-      "Telegram indexing check completed."
+      "Telegram index check completed."
     );
 
   } catch (error) {
-
     console.error(
-      "Telegram indexing failed:",
+      "Initial indexing failed:",
       error
     );
   }
 }
 
 
-/* =========================================================
-   START SERVER
-========================================================= */
+// ======================================================
+// START SERVER
+// ======================================================
 
 app.listen(
   PORT,
   "0.0.0.0",
-  () => {
-
+  async () => {
     console.log(
-      `Server running on port ${PORT}`
+      `Happy Telegram addon running on port ${PORT}`
     );
 
-
-    console.log(
-      `Poster cache: ${posterDir}`
-    );
-
-
-    ensureIndexed();
+    await ensureIndexed();
   }
 );
