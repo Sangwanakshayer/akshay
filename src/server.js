@@ -237,12 +237,15 @@ app.get(
   (req, res) => {
     res.json({
       ok: true,
+
       name:
         "Happy Telegram Media Addon",
+
       status:
         "running",
+
       version:
-        "1.2.0"
+        "1.3.0"
     });
   }
 );
@@ -309,6 +312,7 @@ app.get(
 
       res.status(500).json({
         metas: [],
+
         error:
           error.message
       });
@@ -355,6 +359,7 @@ app.get(
 
       res.status(500).json({
         metas: [],
+
         error:
           error.message
       });
@@ -408,6 +413,7 @@ app.get(
 
       res.status(500).json({
         meta: null,
+
         error:
           error.message
       });
@@ -476,6 +482,7 @@ app.get(
 
       res.status(500).json({
         streams: [],
+
         error:
           error.message
       });
@@ -485,23 +492,34 @@ app.get(
 
 
 /* =========================================================
-   MKV / EBML DURATION
+   MKV DURATION
 ========================================================= */
 
-async function getMkvDuration(message) {
+async function getMkvDuration(
+  message
+) {
+
   const probeSizes = [
     4 * 1024 * 1024,
     16 * 1024 * 1024,
     32 * 1024 * 1024
   ];
 
-  let lastError = null;
+  let lastError =
+    null;
 
-  for (const probeSize of probeSizes) {
+
+  for (
+    const probeSize
+    of probeSizes
+  ) {
+
     try {
+
       console.log(
         `Probing MKV metadata: ${probeSize} bytes`
       );
+
 
       const stream =
         await streamMessage(
@@ -510,31 +528,50 @@ async function getMkvDuration(message) {
           probeSize - 1
         );
 
+
       const chunks = [];
+
       let total = 0;
 
-      for await (const chunk of stream) {
+
+      for await (
+        const chunk of stream
+      ) {
+
         const buffer =
           Buffer.from(chunk);
 
-        chunks.push(buffer);
+        chunks.push(
+          buffer
+        );
 
         total +=
           buffer.length;
 
-        if (total >= probeSize) {
+
+        if (
+          total >= probeSize
+        ) {
           break;
         }
       }
 
-      if (total === 0) {
+
+      if (
+        total === 0
+      ) {
+
         throw new Error(
           "No MKV data received"
         );
       }
 
+
       const buffer =
-        Buffer.concat(chunks);
+        Buffer.concat(
+          chunks
+        );
+
 
       console.log(
         `Received ${buffer.length} bytes for MKV probe`
@@ -542,19 +579,23 @@ async function getMkvDuration(message) {
 
 
       /*
-       * ebml v3 uses Decoder as a
-       * Node Transform stream.
+       * EBML decoder.
        *
-       * Do NOT use decoder.decode().
+       * ebml v3 uses a Transform
+       * stream and emits elements
+       * through "data".
        */
+
       const decoder =
         new Decoder();
 
       const elements = [];
 
+
       decoder.on(
         "data",
         element => {
+
           elements.push(
             element
           );
@@ -562,12 +603,20 @@ async function getMkvDuration(message) {
       );
 
 
-      /*
-       * Feed MKV data into decoder.
-       */
       decoder.write(
         buffer
       );
+
+
+      /*
+       * Flush decoder.
+       */
+      if (
+        typeof decoder.end ===
+        "function"
+      ) {
+        decoder.end();
+      }
 
 
       let timecodeScale =
@@ -590,17 +639,16 @@ async function getMkvDuration(message) {
           continue;
         }
 
+
         const info =
           element[1];
+
 
         if (!info) {
           continue;
         }
 
 
-        /*
-         * Matroska TimecodeScale
-         */
         if (
           info.name ===
           "TimecodeScale"
@@ -610,6 +658,7 @@ async function getMkvDuration(message) {
             Number(
               info.value
             );
+
 
           if (
             Number.isFinite(
@@ -624,9 +673,6 @@ async function getMkvDuration(message) {
         }
 
 
-        /*
-         * Matroska Duration
-         */
         if (
           info.name ===
           "Duration"
@@ -637,6 +683,7 @@ async function getMkvDuration(message) {
               info.value
             );
 
+
           if (
             Number.isFinite(
               value
@@ -646,6 +693,7 @@ async function getMkvDuration(message) {
 
             durationValue =
               value;
+
 
             console.log(
               "EBML Duration found:",
@@ -664,16 +712,17 @@ async function getMkvDuration(message) {
       }
 
 
-      /*
-       * Matroska duration:
-       *
-       * Duration × TimecodeScale
-       * = nanoseconds
-       */
       if (
         durationValue !==
         null
       ) {
+
+        /*
+         * Matroska:
+         *
+         * Duration × TimecodeScale
+         * = nanoseconds.
+         */
 
         const durationSeconds =
           (
@@ -694,24 +743,27 @@ async function getMkvDuration(message) {
             `MKV duration found: ${durationSeconds.toFixed(2)} seconds`
           );
 
+
           return durationSeconds;
         }
       }
 
-
-      console.log(
-        `Duration not found in ${probeSize} bytes`
-      );
 
       lastError =
         new Error(
           "Duration element not found"
         );
 
+
+      console.log(
+        `Duration not found in ${probeSize} bytes`
+      );
+
     } catch (error) {
 
       lastError =
         error;
+
 
       console.error(
         `MKV probe error at ${probeSize} bytes:`,
@@ -728,6 +780,7 @@ async function getMkvDuration(message) {
     }`
   );
 }
+
 
 /* =========================================================
    GENERATE POSTER
@@ -752,8 +805,9 @@ async function generatePoster(
 
 
   /*
-   * Already cached.
+   * Use cached poster.
    */
+
   if (
     fs.existsSync(
       outputPath
@@ -769,8 +823,9 @@ async function generatePoster(
 
 
   /*
-   * Get MKV duration.
+   * Get actual MKV duration.
    */
+
   const duration =
     await getMkvDuration(
       message
@@ -778,15 +833,17 @@ async function generatePoster(
 
 
   /*
-   * 25% position.
+   * Select 25%.
    */
+
   let seekSeconds =
     duration * 0.25;
 
 
   /*
-   * Avoid first/last frame.
+   * Avoid first/last second.
    */
+
   seekSeconds =
     Math.max(
       1,
@@ -816,14 +873,23 @@ async function generatePoster(
   const timestamp =
     [
       String(hours)
-        .padStart(2, "0"),
+        .padStart(
+          2,
+          "0"
+        ),
 
       String(minutes)
-        .padStart(2, "0"),
+        .padStart(
+          2,
+          "0"
+        ),
 
       seconds
         .toFixed(2)
-        .padStart(5, "0")
+        .padStart(
+          5,
+          "0"
+        )
     ].join(":");
 
 
@@ -831,9 +897,11 @@ async function generatePoster(
     `Generating poster for message ${messageId}`
   );
 
+
   console.log(
-    `Duration: ${duration.toFixed(2)} sec`
+    `Duration: ${duration.toFixed(2)} seconds`
   );
+
 
   console.log(
     `25% position: ${timestamp}`
@@ -843,49 +911,71 @@ async function generatePoster(
   return new Promise(
     (resolve, reject) => {
 
+      const args = [
+
+        "-hide_banner",
+
+        "-loglevel",
+        "error",
+
+        "-nostdin",
+
+        /*
+         * IMPORTANT:
+         *
+         * Input first.
+         * This avoids remote HTTP
+         * seeking problems.
+         */
+
+        "-i",
+        inputUrl,
+
+        /*
+         * Seek after input.
+         *
+         * FFmpeg reads sequentially
+         * until the requested point.
+         */
+
+        "-ss",
+        timestamp,
+
+        /*
+         * Extract exactly one frame.
+         */
+
+        "-frames:v",
+        "1",
+
+        /*
+         * Poster width.
+         */
+
+        "-vf",
+        "scale=600:-2",
+
+        /*
+         * JPEG quality.
+         */
+
+        "-q:v",
+        "3",
+
+        "-y",
+        outputPath
+      ];
+
+
+      console.log(
+        "Starting FFmpeg poster extraction..."
+      );
+
+
       const ffmpeg =
         spawn(
           ffmpegPath,
-          [
-            "-hide_banner",
-
-            "-loglevel",
-            "error",
-
-            /*
-             * Seek to 25%.
-             */
-            "-ss",
-            timestamp,
-
-            /*
-             * HTTP Range-enabled
-             * video endpoint.
-             */
-            "-i",
-            inputUrl,
-
-            /*
-             * One frame.
-             */
-            "-frames:v",
-            "1",
-
-            /*
-             * Poster size.
-             */
-            "-vf",
-            "scale=600:-2",
-
-            /*
-             * JPEG quality.
-             */
-            "-q:v",
-            "3",
-
-            "-y",
-            outputPath
-          ],
+          args,
           {
             stdio: [
               "ignore",
@@ -896,15 +986,24 @@ async function generatePoster(
         );
 
 
-      let stderr = "";
+      let stderr =
+        "";
 
 
       ffmpeg.stderr.on(
         "data",
         data => {
 
-          stderr +=
+          const text =
             data.toString();
+
+          stderr +=
+            text;
+
+          console.log(
+            "FFmpeg:",
+            text.trim()
+          );
         }
       );
 
@@ -922,7 +1021,15 @@ async function generatePoster(
 
       ffmpeg.on(
         "close",
-        code => {
+        (
+          code,
+          signal
+        ) => {
+
+          console.log(
+            `FFmpeg closed. code=${code}, signal=${signal}`
+          );
+
 
           if (
             code === 0 &&
@@ -935,9 +1042,11 @@ async function generatePoster(
               `Poster generated successfully: ${messageId}`
             );
 
+
             resolve(
               outputPath
             );
+
 
             return;
           }
@@ -945,7 +1054,7 @@ async function generatePoster(
 
           reject(
             new Error(
-              `FFmpeg poster generation failed. code=${code}. ${stderr.slice(-2000)}`
+              `FFmpeg poster generation failed. code=${code}, signal=${signal}. ${stderr.slice(-3000)}`
             )
           );
         }
@@ -982,8 +1091,9 @@ app.get(
 
 
       /*
-       * Get fresh Telegram message.
+       * Get Telegram message.
        */
+
       const message =
         await getMessage(
           messageId
@@ -1001,8 +1111,9 @@ app.get(
 
 
       /*
-       * Must have a document.
+       * Verify document.
        */
+
       if (
         !message.media?.document
       ) {
@@ -1022,6 +1133,10 @@ app.get(
       const inputUrl =
         `${baseUrl}/file/${messageId}`;
 
+
+      /*
+       * Generate or load poster.
+       */
 
       const posterPath =
         await generatePoster(
@@ -1090,7 +1205,8 @@ app.get(
 
 
 /* =========================================================
-   VIDEO FILE STREAM
+   TELEGRAM VIDEO FILE
+   HTTP RANGE STREAMING
 ========================================================= */
 
 app.get(
@@ -1148,7 +1264,7 @@ app.get(
 
       const mime =
         document?.mimeType ||
-        "video/mp4";
+        "video/x-matroska";
 
 
       const range =
@@ -1162,8 +1278,9 @@ app.get(
 
 
       /*
-       * Parse HTTP Range.
+       * Parse Range.
        */
+
       if (range) {
 
         const match =
@@ -1201,6 +1318,7 @@ app.get(
       /*
        * Invalid range.
        */
+
       if (
         start >= fileSize ||
         end >= fileSize ||
@@ -1271,9 +1389,9 @@ app.get(
 
 
       /*
-       * Stream requested portion
-       * directly from Telegram.
+       * Telegram → HTTP stream.
        */
+
       const stream =
         await streamMessage(
           message,
@@ -1336,7 +1454,7 @@ app.get(
 
 
 /* =========================================================
-   INITIAL INDEXING
+   INITIAL TELEGRAM INDEXING
 ========================================================= */
 
 async function ensureIndexed() {
@@ -1378,9 +1496,11 @@ app.listen(
       `Server running on port ${PORT}`
     );
 
+
     console.log(
       `Poster cache: ${posterDir}`
     );
+
 
     ensureIndexed();
   }
