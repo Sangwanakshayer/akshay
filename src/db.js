@@ -133,7 +133,7 @@ const migrations = [
   [
     "tpdb_checked",
     "ALTER TABLE media ADD COLUMN tpdb_checked INTEGER DEFAULT 0"
-  ]
+  ],
   [
     "tpdb_parser_version", 
     "ALTER TABLE media ADD COLUMN tpdb_parser_version INTEGER DEFAULT 0"
