@@ -488,17 +488,7 @@ app.get(
    MKV / EBML DURATION
 ========================================================= */
 
-async function getMkvDuration(
-  message
-) {
-
-  /*
-   * We progressively inspect the beginning
-   * of the MKV file.
-   *
-   * Usually Matroska Info is near the beginning.
-   */
-
+async function getMkvDuration(message) {
   const probeSizes = [
     4 * 1024 * 1024,
     16 * 1024 * 1024,
@@ -507,22 +497,12 @@ async function getMkvDuration(
 
   let lastError = null;
 
-
-  for (
-    const probeSize of probeSizes
-  ) {
-
+  for (const probeSize of probeSizes) {
     try {
-
       console.log(
         `Probing MKV metadata: ${probeSize} bytes`
       );
 
-
-      /*
-       * Download ONLY the requested
-       * beginning portion from Telegram.
-       */
       const stream =
         await streamMessage(
           message,
@@ -530,48 +510,31 @@ async function getMkvDuration(
           probeSize - 1
         );
 
-
       const chunks = [];
-
       let total = 0;
 
+      for await (const chunk of stream) {
+        const buffer =
+          Buffer.from(chunk);
 
-      for await (
-        const chunk of stream
-      ) {
-
-        chunks.push(
-          Buffer.from(chunk)
-        );
+        chunks.push(buffer);
 
         total +=
-          chunk.length;
+          buffer.length;
 
-        /*
-         * Safety limit.
-         */
-        if (
-          total >= probeSize
-        ) {
+        if (total >= probeSize) {
           break;
         }
       }
 
-
-      if (
-        total === 0
-      ) {
+      if (total === 0) {
         throw new Error(
           "No MKV data received"
         );
       }
 
-
       const buffer =
-        Buffer.concat(
-          chunks
-        );
-
+        Buffer.concat(chunks);
 
       console.log(
         `Received ${buffer.length} bytes for MKV probe`
@@ -579,40 +542,32 @@ async function getMkvDuration(
 
 
       /*
-       * Decode EBML.
+       * ebml v3 uses Decoder as a
+       * Node Transform stream.
+       *
+       * Do NOT use decoder.decode().
        */
       const decoder =
         new Decoder();
 
+      const elements = [];
 
-      let elements;
-
-
-      try {
-
-        elements =
-          decoder.decode(
-            buffer
+      decoder.on(
+        "data",
+        element => {
+          elements.push(
+            element
           );
+        }
+      );
 
-      } catch (decodeError) {
 
-        /*
-         * Truncated EBML is possible
-         * when metadata continues beyond
-         * current probe size.
-         *
-         * Continue with a larger probe.
-         */
-        lastError =
-          decodeError;
-
-        console.log(
-          `EBML decode incomplete at ${probeSize} bytes`
-        );
-
-        continue;
-      }
+      /*
+       * Feed MKV data into decoder.
+       */
+      decoder.write(
+        buffer
+      );
 
 
       let timecodeScale =
@@ -628,17 +583,24 @@ async function getMkvDuration(
       ) {
 
         if (
-          !element ||
-          !element[1]
+          !Array.isArray(
+            element
+          )
         ) {
           continue;
         }
 
-
         const info =
           element[1];
 
+        if (!info) {
+          continue;
+        }
 
+
+        /*
+         * Matroska TimecodeScale
+         */
         if (
           info.name ===
           "TimecodeScale"
@@ -662,6 +624,9 @@ async function getMkvDuration(
         }
 
 
+        /*
+         * Matroska Duration
+         */
         if (
           info.name ===
           "Duration"
@@ -681,34 +646,35 @@ async function getMkvDuration(
 
             durationValue =
               value;
+
+            console.log(
+              "EBML Duration found:",
+              durationValue
+            );
           }
         }
 
 
-        /*
-         * Once both values are found,
-         * no need to parse further.
-         */
         if (
-          durationValue !== null
+          durationValue !==
+          null
         ) {
           break;
         }
       }
 
 
+      /*
+       * Matroska duration:
+       *
+       * Duration × TimecodeScale
+       * = nanoseconds
+       */
       if (
-        durationValue !== null
+        durationValue !==
+        null
       ) {
 
-        /*
-         * Matroska:
-         *
-         * Duration × TimecodeScale
-         * gives nanoseconds.
-         *
-         * Convert to seconds.
-         */
         const durationSeconds =
           (
             durationValue *
@@ -733,9 +699,13 @@ async function getMkvDuration(
       }
 
 
+      console.log(
+        `Duration not found in ${probeSize} bytes`
+      );
+
       lastError =
         new Error(
-          "Duration element not found in current MKV probe"
+          "Duration element not found"
         );
 
     } catch (error) {
@@ -758,7 +728,6 @@ async function getMkvDuration(
     }`
   );
 }
-
 
 /* =========================================================
    GENERATE POSTER
