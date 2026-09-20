@@ -1,6 +1,5 @@
 import express from "express";
 import cors from "cors";
-import fs from "fs";
 import path from "path";
 import dotenv from "dotenv";
 
@@ -17,19 +16,12 @@ import {
   indexTelegram
 } from "./indexer.js";
 
-import {
-  generatePoster
-} from "./poster.js";
-
 dotenv.config();
 
 const app = express();
 
 app.use(cors());
-
-app.use(
-  express.json()
-);
+app.use(express.json());
 
 const PORT =
   Number(process.env.PORT) || 7000;
@@ -38,9 +30,7 @@ const db =
   getDb();
 
 const MANIFEST_PATH =
-  path.resolve(
-    "./manifest.json"
-  );
+  path.resolve("./manifest.json");
 
 
 // ======================================================
@@ -48,21 +38,40 @@ const MANIFEST_PATH =
 // ======================================================
 
 function getBaseUrl(req) {
-  if (
-    process.env.PUBLIC_BASE_URL
-  ) {
-    return process.env.PUBLIC_BASE_URL
-      .replace(/\/$/, "");
+  if (process.env.PUBLIC_BASE_URL) {
+    return process.env.PUBLIC_BASE_URL.replace(
+      /\/$/,
+      ""
+    );
   }
 
   const forwardedProto =
     req.headers["x-forwarded-proto"];
 
   const protocol =
-    forwardedProto ||
-    req.protocol;
+    forwardedProto || req.protocol;
 
   return `${protocol}://${req.get("host")}`;
+}
+
+
+// ======================================================
+// SAFE JSON
+// ======================================================
+
+function parseJson(
+  value,
+  fallback = []
+) {
+  if (!value) {
+    return fallback;
+  }
+
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
 }
 
 
@@ -121,9 +130,6 @@ app.get(
       const type =
         req.params.type;
 
-      const catalogId =
-        req.params.id;
-
       const search =
         String(
           req.query.search || ""
@@ -137,8 +143,7 @@ app.get(
           )
         );
 
-      const limit =
-        100;
+      const limit = 100;
 
       let rows;
 
@@ -152,14 +157,16 @@ app.get(
                 title LIKE ?
                 OR filename LIKE ?
                 OR caption LIKE ?
+                OR tpdb_title LIKE ?
+                OR tpdb_studio LIKE ?
               )
-            ORDER BY
-              COALESCE(year, 0) DESC,
-              id DESC
+            ORDER BY id DESC
             LIMIT ?
             OFFSET ?
           `).all(
             type,
+            `%${search}%`,
+            `%${search}%`,
             `%${search}%`,
             `%${search}%`,
             `%${search}%`,
@@ -172,8 +179,7 @@ app.get(
             SELECT *
             FROM media
             WHERE type = ?
-            ORDER BY
-              id DESC
+            ORDER BY id DESC
             LIMIT ?
             OFFSET ?
           `).all(
@@ -291,112 +297,7 @@ app.get(
 
 
 // ======================================================
-// POSTER
-// ======================================================
-
-app.get(
-  "/poster/:messageId",
-  async (req, res) => {
-    try {
-      const messageId =
-        Number(
-          req.params.messageId
-        );
-
-      if (!messageId) {
-        return res
-          .status(400)
-          .send(
-            "Invalid message ID"
-          );
-      }
-
-      const posterPath =
-        path.resolve(
-          "./data/posters",
-          `${messageId}.jpg`
-        );
-
-      // --------------------------------------------------
-      // CACHE HIT
-      // --------------------------------------------------
-
-      if (
-        fs.existsSync(
-          posterPath
-        )
-      ) {
-        res.setHeader(
-          "Content-Type",
-          "image/jpeg"
-        );
-
-        res.setHeader(
-          "Cache-Control",
-          "public, max-age=31536000, immutable"
-        );
-
-        return res.sendFile(
-          posterPath
-        );
-      }
-
-      // --------------------------------------------------
-      // GENERATE POSTER AT 02:30
-      // --------------------------------------------------
-
-      console.log(
-        `Poster not cached. Generating for message ${messageId}`
-      );
-
-      const generatedPath =
-        await generatePoster(
-          messageId
-        );
-
-      if (
-        !generatedPath ||
-        !fs.existsSync(
-          generatedPath
-        )
-      ) {
-        throw new Error(
-          "Poster file was not generated"
-        );
-      }
-
-      res.setHeader(
-        "Content-Type",
-        "image/jpeg"
-      );
-
-      res.setHeader(
-        "Cache-Control",
-        "public, max-age=31536000, immutable"
-      );
-
-      return res.sendFile(
-        generatedPath
-      );
-
-    } catch (error) {
-      console.error(
-        "Poster error:",
-        error
-      );
-
-      return res
-        .status(500)
-        .send(
-          "Poster generation failed"
-        );
-    }
-  }
-);
-
-
-// ======================================================
-// STREAM
+// STREAM METADATA
 // ======================================================
 
 app.get(
@@ -443,25 +344,27 @@ app.get(
       const baseUrl =
         getBaseUrl(req);
 
+      const displayTitle =
+        row.tpdb_title ||
+        row.title ||
+        row.filename ||
+        "Telegram";
+
       res.json({
         streams: [
           {
             name:
-              row.title ||
-              row.filename ||
-              "Telegram",
+              displayTitle,
 
             title:
               row.filename ||
-              row.title ||
-              "Telegram",
+              displayTitle,
 
             url:
               `${baseUrl}/file/${row.message_id}`,
 
             behaviorHints: {
-              notWebReady:
-                true
+              notWebReady: true
             }
           }
         ]
@@ -545,16 +448,15 @@ app.get(
         document.mimeType ||
         "application/octet-stream";
 
-
-      // ==================================================
-      // RANGE REQUEST
-      // ==================================================
-
       const range =
         req.headers.range;
 
-      if (!range) {
 
+      // ==================================================
+      // FULL FILE
+      // ==================================================
+
+      if (!range) {
         res.status(200);
 
         res.setHeader(
@@ -588,9 +490,7 @@ app.get(
           for await (
             const chunk of iterator
           ) {
-            if (
-              !res.write(chunk)
-            ) {
+            if (!res.write(chunk)) {
               await new Promise(
                 resolve =>
                   res.once(
@@ -609,15 +509,7 @@ app.get(
             error
           );
 
-          if (
-            !res.headersSent
-          ) {
-            res
-              .status(500)
-              .end();
-          } else {
-            res.destroy();
-          }
+          res.destroy();
         }
 
         return;
@@ -625,7 +517,7 @@ app.get(
 
 
       // ==================================================
-      // PARSE RANGE
+      // RANGE REQUEST
       // ==================================================
 
       const match =
@@ -655,25 +547,27 @@ app.get(
 
 
       // bytes=-500000
+
       if (
         start === null &&
         end !== null
       ) {
-        const suffixLength =
+        const suffix =
           end;
 
         start =
           Math.max(
             0,
-            fileSize -
-              suffixLength
+            fileSize - suffix
           );
 
         end =
           fileSize - 1;
       }
 
+
       // bytes=500000-
+
       if (
         start !== null &&
         end === null
@@ -681,6 +575,7 @@ app.get(
         end =
           fileSize - 1;
       }
+
 
       if (
         start === null ||
@@ -698,6 +593,7 @@ app.get(
           .end();
       }
 
+
       end =
         Math.min(
           end,
@@ -705,9 +601,7 @@ app.get(
         );
 
       const contentLength =
-        end -
-        start +
-        1;
+        end - start + 1;
 
 
       // ==================================================
@@ -742,13 +636,10 @@ app.get(
       );
 
 
-      // ==================================================
-      // TELEGRAM STREAM
-      // ==================================================
-
       console.log(
-        `HTTP range request: ${start}-${end}/${fileSize}`
+        `HTTP range: ${start}-${end}/${fileSize}`
       );
+
 
       const iterator =
         await streamMessage(
@@ -757,13 +648,12 @@ app.get(
           end
         );
 
+
       try {
         for await (
           const chunk of iterator
         ) {
-          if (
-            !res.write(chunk)
-          ) {
+          if (!res.write(chunk)) {
             await new Promise(
               resolve =>
                 res.once(
@@ -791,9 +681,7 @@ app.get(
         error
       );
 
-      if (
-        !res.headersSent
-      ) {
+      if (!res.headersSent) {
         res
           .status(500)
           .send(
@@ -815,16 +703,87 @@ function makeMeta(
   row,
   baseUrl
 ) {
-  const posterUrl =
-    `${baseUrl}/poster/${row.message_id}`;
+  const performers =
+    parseJson(
+      row.tpdb_performers,
+      []
+    );
 
-  const streamUrl =
-    `${baseUrl}/file/${row.message_id}`;
+  const tags =
+    parseJson(
+      row.tpdb_tags,
+      []
+    );
+
+
+  const cast =
+    performers
+      .map(
+        performer => {
+          if (
+            typeof performer ===
+            "string"
+          ) {
+            return performer;
+          }
+
+          return (
+            performer?.name ||
+            performer?.display_name ||
+            performer?.title ||
+            ""
+          );
+        }
+      )
+      .filter(Boolean);
+
+
+  const genres =
+    tags
+      .map(
+        tag => {
+          if (
+            typeof tag ===
+            "string"
+          ) {
+            return tag;
+          }
+
+          return (
+            tag?.name ||
+            tag?.title ||
+            ""
+          );
+        }
+      )
+      .filter(Boolean);
+
 
   const type =
     row.type === "series"
       ? "series"
       : "movie";
+
+
+  const displayTitle =
+    row.tpdb_title ||
+    row.title ||
+    row.filename ||
+    `Telegram ${row.message_id}`;
+
+
+  const description =
+    row.tpdb_description ||
+    row.caption ||
+    row.filename ||
+    "";
+
+
+  const year =
+    row.tpdb_year ||
+    row.year ||
+    undefined;
+
 
   const meta = {
     id:
@@ -833,60 +792,47 @@ function makeMeta(
     type,
 
     name:
-      row.title ||
-      row.filename ||
-      `Telegram ${row.message_id}`,
+      displayTitle,
 
-    poster:
-      posterUrl,
+    description,
 
-    background:
-      posterUrl,
-
-    description:
-      row.caption ||
-      row.filename ||
-      "",
-
-    year:
-      row.year ||
-      undefined,
+    year,
 
     releaseInfo:
-      row.year
-        ? String(row.year)
+      year
+        ? String(year)
         : undefined,
 
-    runtime:
-      undefined,
+    genres:
+      genres.length
+        ? genres
+        : undefined,
 
-    website:
-      undefined,
+    cast:
+      cast.length
+        ? cast
+        : undefined,
 
-    videos:
-      undefined,
+    links: [],
 
     behaviorHints: {
       defaultVideoId:
-        `tg:${row.id}`
-    },
+        `tg:${row.id}`,
 
-    links: [],
+      adult: true
+    },
 
     streams: [
       {
         name:
-          row.title ||
-          row.filename ||
-          "Telegram",
+          displayTitle,
 
         title:
           row.filename ||
-          row.title ||
-          "Telegram",
+          displayTitle,
 
         url:
-          streamUrl,
+          `${baseUrl}/file/${row.message_id}`,
 
         behaviorHints: {
           notWebReady: true
@@ -895,7 +841,26 @@ function makeMeta(
     ]
   };
 
-  // Remove undefined fields
+
+  // TPDB poster only.
+  // No FFmpeg/local poster fallback.
+
+  if (row.tpdb_poster) {
+    meta.poster =
+      row.tpdb_poster;
+  }
+
+  if (row.tpdb_background) {
+    meta.background =
+      row.tpdb_background;
+  } else if (
+    row.tpdb_poster
+  ) {
+    meta.background =
+      row.tpdb_poster;
+  }
+
+
   return JSON.parse(
     JSON.stringify(meta)
   );
