@@ -25,7 +25,7 @@ def _start_loop():
 def _run(coro):
     return asyncio.run_coroutine_threadsafe(coro, LOOP).result()
 
-def _ensure_client(api_id, api_hash, phone, session_dir):
+def _ensure_client(api_id, api_hash, session_dir):
     global CLIENT, LOOP
     if LOOP is None:
         threading.Thread(target=_start_loop, daemon=True).start()
@@ -36,22 +36,24 @@ def _ensure_client(api_id, api_hash, phone, session_dir):
         session = os.path.join(session_dir, "telegram")
         CLIENT = TelegramClient(session, int(api_id), api_hash, loop=LOOP)
 
-    async def connect():
-        await CLIENT.connect()
-        if not await CLIENT.is_user_authorized():
-            await CLIENT.send_code_request(phone)
-            return False
-        return True
-
-    return _run(connect())
+    return _run(CLIENT.connect())
 
 def send_code(api_id, api_hash, phone, code_unused, session_dir):
-    ok = _ensure_client(api_id, api_hash, phone, session_dir)
-    return "Code sent. Enter the Telegram code and press Login." if not ok else "Already logged in."
+    _ensure_client(api_id, api_hash, session_dir)
+
+    async def request():
+        if await CLIENT.is_user_authorized():
+            return "Already logged in."
+        await CLIENT.send_code_request(phone)
+        return "Code sent. Enter the Telegram code and press Login."
+
+    try:
+        return _run(request())
+    except Exception as e:
+        return "Send-code error: " + str(e)
 
 def login(api_id, api_hash, phone, code, session_dir):
-    global CLIENT
-    _ensure_client(api_id, api_hash, phone, session_dir)
+    _ensure_client(api_id, api_hash, session_dir)
 
     async def do_login():
         if await CLIENT.is_user_authorized():
@@ -268,8 +270,9 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
-def start_server(session_dir, channel, tpdb_token, port=8765):
+def start_server(session_dir, api_id, api_hash, phone, channel, tpdb_token, port=8765):
     global CHANNEL, TPDB_TOKEN, PORT
+    _ensure_client(api_id, api_hash, session_dir)
     CHANNEL = channel
     TPDB_TOKEN = tpdb_token or ""
     PORT = int(port)
