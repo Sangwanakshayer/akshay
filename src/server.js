@@ -284,12 +284,8 @@ app.get(
       const rows =
         getCatalogRows(
           req.params.type,
-
-          extra.search ||
-            "",
-
-          extra.skip ||
-            0
+          extra.search || "",
+          extra.skip || 0
         );
 
       const metas =
@@ -314,7 +310,6 @@ app.get(
 
       res.status(500).json({
         metas: [],
-
         error:
           error.message
       });
@@ -360,7 +355,6 @@ app.get(
 
       res.status(500).json({
         metas: [],
-
         error:
           error.message
       });
@@ -414,7 +408,6 @@ app.get(
 
       res.status(500).json({
         meta: null,
-
         error:
           error.message
       });
@@ -483,7 +476,6 @@ app.get(
 
       res.status(500).json({
         streams: [],
-
         error:
           error.message
       });
@@ -493,13 +485,225 @@ app.get(
 
 
 /* =========================================================
-   GENERATE POSTER
-   25% VIDEO POSITION
+   GET VIDEO DURATION USING FFMPEG
+========================================================= */
+
+async function getVideoDuration(
+  inputUrl
+) {
+  return new Promise(
+    (resolve, reject) => {
+
+      const ffmpeg =
+        spawn(
+          ffmpegPath,
+          [
+            "-hide_banner",
+
+            "-analyzeduration",
+            "5M",
+
+            "-probesize",
+            "10M",
+
+            "-i",
+            inputUrl,
+
+            "-f",
+            "null",
+
+            "-"
+          ],
+          {
+            stdio: [
+              "ignore",
+              "ignore",
+              "pipe"
+            ]
+          }
+        );
+
+      let stderr = "";
+
+      let resolved =
+        false;
+
+
+      const finish =
+        duration => {
+
+          if (resolved) {
+            return;
+          }
+
+          resolved = true;
+
+          try {
+            ffmpeg.kill(
+              "SIGKILL"
+            );
+          } catch {}
+
+          resolve(
+            duration
+          );
+        };
+
+
+      ffmpeg.stderr.on(
+        "data",
+        data => {
+
+          stderr +=
+            data.toString();
+
+          const match =
+            stderr.match(
+              /Duration:\s*(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)/i
+            );
+
+
+          if (!match) {
+            return;
+          }
+
+
+          const hours =
+            Number(
+              match[1]
+            );
+
+          const minutes =
+            Number(
+              match[2]
+            );
+
+          const seconds =
+            Number(
+              match[3]
+            );
+
+
+          const duration =
+            hours * 3600 +
+            minutes * 60 +
+            seconds;
+
+
+          if (
+            duration > 0
+          ) {
+            finish(
+              duration
+            );
+          }
+        }
+      );
+
+
+      ffmpeg.on(
+        "error",
+        error => {
+
+          if (resolved) {
+            return;
+          }
+
+          resolved = true;
+
+          reject(
+            error
+          );
+        }
+      );
+
+
+      ffmpeg.on(
+        "close",
+        code => {
+
+          if (resolved) {
+            return;
+          }
+
+
+          const match =
+            stderr.match(
+              /Duration:\s*(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)/i
+            );
+
+
+          if (match) {
+
+            const duration =
+              Number(match[1]) *
+                3600 +
+
+              Number(match[2]) *
+                60 +
+
+              Number(match[3]);
+
+
+            if (
+              duration > 0
+            ) {
+              finish(
+                duration
+              );
+
+              return;
+            }
+          }
+
+
+          resolved = true;
+
+          reject(
+            new Error(
+              `Could not determine video duration. FFmpeg code=${code}. ${stderr.slice(-1000)}`
+            )
+          );
+        }
+      );
+
+
+      setTimeout(
+        () => {
+
+          if (resolved) {
+            return;
+          }
+
+          resolved = true;
+
+          try {
+            ffmpeg.kill(
+              "SIGKILL"
+            );
+          } catch {}
+
+          reject(
+            new Error(
+              "FFmpeg duration probe timed out"
+            )
+          );
+
+        },
+        15000
+      );
+    }
+  );
+}
+
+
+/* =========================================================
+   GENERATE 25% POSTER
 ========================================================= */
 
 async function generatePoster(
   messageId,
-  duration
+  inputUrl
 ) {
 
   const outputPath =
@@ -510,7 +714,7 @@ async function generatePoster(
 
 
   /*
-   * Already generated.
+   * Already cached.
    */
   if (
     fs.existsSync(
@@ -522,41 +726,40 @@ async function generatePoster(
   }
 
 
+  console.log(
+    `Getting duration for message ${messageId}...`
+  );
+
+
   /*
-   * Calculate 25%.
-   *
-   * Keep a small margin from
-   * exact beginning/end.
+   * Ask FFmpeg for actual
+   * video duration.
+   */
+  const duration =
+    await getVideoDuration(
+      inputUrl
+    );
+
+
+  /*
+   * Select 25% position.
    */
   let seekSeconds =
-    Number(duration || 0) *
-    0.25;
-
-
-  if (
-    !Number.isFinite(
-      seekSeconds
-    ) ||
-    seekSeconds < 1
-  ) {
-
-    seekSeconds = 1;
-  }
+    duration * 0.25;
 
 
   /*
-   * Don't seek beyond the video.
+   * Avoid exact beginning
+   * and exact end.
    */
-  if (
-    Number(duration) > 2
-  ) {
-
-    seekSeconds =
+  seekSeconds =
+    Math.max(
+      1,
       Math.min(
         seekSeconds,
-        Number(duration) - 1
-      );
-  }
+        duration - 1
+      )
+    );
 
 
   const hours =
@@ -570,9 +773,7 @@ async function generatePoster(
     );
 
   const seconds =
-    Math.floor(
-      seekSeconds % 60
-    );
+    seekSeconds % 60;
 
 
   const timestamp =
@@ -583,95 +784,79 @@ async function generatePoster(
       String(minutes)
         .padStart(2, "0"),
 
-      String(seconds)
-        .padStart(2, "0")
+      seconds
+        .toFixed(2)
+        .padStart(5, "0")
     ].join(":");
 
 
   console.log(
-    `Generating poster for ${messageId} at 25% (${timestamp})`
+    `Generating poster for ${messageId} at 25%: ${timestamp}`
   );
-
-
-  /*
-   * IMPORTANT:
-   *
-   * The existing /file/:messageId
-   * endpoint supports HTTP Range.
-   *
-   * FFmpeg therefore does not need
-   * the complete video beforehand.
-   */
-  const baseUrl =
-    process.env.PUBLIC_BASE_URL ||
-    `http://127.0.0.1:${PORT}`;
-
-  const inputUrl =
-    `${baseUrl}/file/${messageId}`;
 
 
   return new Promise(
     (resolve, reject) => {
 
-      const args = [
-
-        "-hide_banner",
-
-        "-loglevel",
-        "error",
-
-        /*
-         * Seek to 25% position.
-         */
-        "-ss",
-        timestamp,
-
-        /*
-         * HTTP input.
-         */
-        "-i",
-        inputUrl,
-
-        /*
-         * Exactly one frame.
-         */
-        "-frames:v",
-        "1",
-
-        /*
-         * Poster size.
-         */
-        "-vf",
-        "scale=600:-2",
-
-        /*
-         * JPEG quality.
-         */
-        "-q:v",
-        "3",
-
-        /*
-         * Output.
-         */
-        "-y",
-        outputPath
-      ];
-
-
       const ffmpeg =
         spawn(
           ffmpegPath,
-          args
+          [
+            "-hide_banner",
+
+            "-loglevel",
+            "error",
+
+            /*
+             * Seek to 25%.
+             */
+            "-ss",
+            timestamp,
+
+            /*
+             * Video URL.
+             */
+            "-i",
+            inputUrl,
+
+            /*
+             * One frame.
+             */
+            "-frames:v",
+            "1",
+
+            /*
+             * Poster width.
+             */
+            "-vf",
+            "scale=600:-2",
+
+            /*
+             * JPEG quality.
+             */
+            "-q:v",
+            "3",
+
+            "-y",
+            outputPath
+          ],
+          {
+            stdio: [
+              "ignore",
+              "ignore",
+              "pipe"
+            ]
+          }
         );
 
 
-      let stderr =
-        "";
+      let stderr = "";
 
 
       ffmpeg.stderr.on(
         "data",
         data => {
+
           stderr +=
             data.toString();
         }
@@ -714,7 +899,7 @@ async function generatePoster(
 
           reject(
             new Error(
-              `FFmpeg failed with code ${code}: ${stderr}`
+              `FFmpeg poster generation failed. code=${code}. ${stderr.slice(-1500)}`
             )
           );
         }
@@ -751,79 +936,24 @@ app.get(
 
 
       /*
-       * Get actual Telegram message.
+       * Use actual Render URL.
        */
-      const message =
-        await getMessage(
-          messageId
-        );
+      const baseUrl =
+        getBaseUrl(req);
 
 
-      if (!message) {
-
-        return res
-          .status(404)
-          .send(
-            "Telegram message not found"
-          );
-      }
+      const inputUrl =
+        `${baseUrl}/file/${messageId}`;
 
 
       /*
-       * Get Telegram document.
+       * Generate or load
+       * cached poster.
        */
-      const document =
-        message?.media?.document;
-
-
-      if (!document) {
-
-        return res
-          .status(404)
-          .send(
-            "Telegram document not found"
-          );
-      }
-
-
-      /*
-       * Find video duration.
-       *
-       * Telegram stores duration
-       * in DocumentAttributeVideo.
-       */
-      const videoAttribute =
-        document.attributes
-          ?.find(
-            attr =>
-              attr?.className ===
-              "DocumentAttributeVideo"
-          );
-
-
-      const duration =
-        Number(
-          videoAttribute?.duration ||
-          0
-        );
-
-
-      if (
-        !duration
-      ) {
-
-        return res
-          .status(404)
-          .send(
-            "Video duration unavailable"
-          );
-      }
-
-
       const posterPath =
         await generatePoster(
           messageId,
-          duration
+          inputUrl
         );
 
 
@@ -845,11 +975,6 @@ app.get(
       );
 
 
-      /*
-       * Poster does not change
-       * unless the Telegram message
-       * itself changes.
-       */
       res.setHeader(
         "Cache-Control",
         "public, max-age=31536000, immutable"
@@ -858,7 +983,9 @@ app.get(
 
       fs.createReadStream(
         posterPath
-      ).pipe(res);
+      ).pipe(
+        res
+      );
 
 
     } catch (error) {
@@ -890,7 +1017,8 @@ app.get(
 
 
 /* =========================================================
-   VIDEO FILE STREAM
+   TELEGRAM VIDEO FILE
+   HTTP RANGE STREAMING
 ========================================================= */
 
 app.get(
@@ -961,6 +1089,9 @@ app.get(
         fileSize - 1;
 
 
+      /*
+       * HTTP Range.
+       */
       if (range) {
 
         const match =
@@ -971,7 +1102,9 @@ app.get(
 
         if (match) {
 
-          if (match[1]) {
+          if (
+            match[1]
+          ) {
 
             start =
               Number(
@@ -980,7 +1113,9 @@ app.get(
           }
 
 
-          if (match[2]) {
+          if (
+            match[2]
+          ) {
 
             end =
               Number(
@@ -991,6 +1126,9 @@ app.get(
       }
 
 
+      /*
+       * Invalid range.
+       */
       if (
         start >= fileSize ||
         end >= fileSize ||
@@ -1060,6 +1198,10 @@ app.get(
       );
 
 
+      /*
+       * Stream only requested
+       * portion from Telegram.
+       */
       const stream =
         await streamMessage(
           message,
@@ -1122,7 +1264,7 @@ app.get(
 
 
 /* =========================================================
-   INITIAL INDEXING
+   INDEX TELEGRAM
 ========================================================= */
 
 async function ensureIndexed() {
@@ -1164,11 +1306,9 @@ app.listen(
       `Server running on port ${PORT}`
     );
 
-
     console.log(
       `Poster cache: ${posterDir}`
     );
-
 
     ensureIndexed();
   }
