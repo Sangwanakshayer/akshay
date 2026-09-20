@@ -1,1372 +1,427 @@
+import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import path from "path";
-import dotenv from "dotenv";
 
 import { getDb } from "./db.js";
-import {
-  getMessage,
-  streamMessage
-} from "./telegram.js";
-import { indexTelegram } from "./indexer.js";
-
-dotenv.config();
-
-
-// ======================================================
-// APP
-// ======================================================
+import { getMessage, streamMessage } from "./telegram.js";
 
 const app = express();
 
 app.use(cors());
+app.use(express.json());
 
-app.use(
-  express.json()
-);
+const PORT = process.env.PORT || 3000;
+const BASE_URL =
+  process.env.PUBLIC_BASE_URL ||
+  `http://localhost:${PORT}`;
 
+const MANIFEST = {
+  id: "com.akshay.happytelegram",
+  version: "1.0.0",
+  name: "Happy Telegram",
+  description: "Private Telegram media library",
 
-const PORT =
-  Number(process.env.PORT) || 7000;
+  resources: [
+    "catalog",
+    "meta",
+    "stream"
+  ],
 
+  types: [
+    "movie",
+    "series"
+  ],
 
-const db =
-  getDb();
+  idPrefixes: [
+    "tg:"
+  ],
 
+  catalogs: [
+    {
+      type: "movie",
+      id: "happy-movies",
+      name: "Happy Movies",
+      extra: [
+        {
+          name: "search",
+          isRequired: false
+        },
+        {
+          name: "skip",
+          isRequired: false
+        }
+      ]
+    },
+    {
+      type: "series",
+      id: "happy-series",
+      name: "Happy Series",
+      extra: [
+        {
+          name: "search",
+          isRequired: false
+        },
+        {
+          name: "skip",
+          isRequired: false
+        }
+      ]
+    }
+  ],
 
-const MANIFEST_PATH =
-  path.resolve(
-    "./manifest.json"
-  );
-
-
-// ======================================================
-// BASE URL
-// ======================================================
-
-function getBaseUrl(req) {
-
-  if (
-    process.env.PUBLIC_BASE_URL
-  ) {
-    return process.env
-      .PUBLIC_BASE_URL
-      .replace(/\/$/, "");
+  behaviorHints: {
+    adult: true,
+    p2p: false,
+    configurable: false,
+    configurationRequired: false
   }
+};
 
 
-  const forwardedProto =
-    req.headers[
-      "x-forwarded-proto"
-    ];
+/* =========================================================
+   DATABASE HELPERS
+   ========================================================= */
 
+function getMediaById(id) {
+  const db = getDb();
 
-  const protocol =
-    forwardedProto ||
-    req.protocol;
-
-
-  return (
-    `${protocol}://${req.get("host")}`
-  );
+  return db
+    .prepare(
+      `
+      SELECT *
+      FROM media
+      WHERE id = ?
+      LIMIT 1
+      `
+    )
+    .get(id);
 }
 
 
-// ======================================================
-// JSON HELPER
-// ======================================================
+function getMediaByMessageId(messageId) {
+  const db = getDb();
 
-function parseJson(
-  value,
-  fallback = []
-) {
-
-  if (!value) {
-    return fallback;
-  }
-
-
-  try {
-
-    return JSON.parse(
-      value
-    );
-
-  } catch {
-
-    return fallback;
-  }
+  return db
+    .prepare(
+      `
+      SELECT *
+      FROM media
+      WHERE message_id = ?
+      LIMIT 1
+      `
+    )
+    .get(messageId);
 }
 
 
-// ======================================================
-// SAFE STRING
-// ======================================================
+/* =========================================================
+   GENERAL HELPERS
+   ========================================================= */
 
-function safeString(
-  value
-) {
+function safeNumber(value, fallback = 0) {
+  const n = Number(value);
 
-  if (
-    value === undefined ||
-    value === null
-  ) {
+  return Number.isFinite(n)
+    ? n
+    : fallback;
+}
+
+
+function cleanText(value) {
+  if (value === undefined || value === null) {
     return "";
   }
-
 
   return String(value).trim();
 }
 
 
-// ======================================================
-// ROOT
-// ======================================================
-
-app.get(
-  "/",
-  (req, res) => {
-
-    res.json({
-      ok: true,
-      name: "Happy Telegram Addon",
-      status: "running"
-    });
-
+function decodeId(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
   }
-);
-
-
-// ======================================================
-// MANIFEST
-// ======================================================
-
-app.get(
-  "/manifest.json",
-  (req, res) => {
-
-    try {
-
-      res.sendFile(
-        MANIFEST_PATH
-      );
-
-    } catch (error) {
-
-      console.error(
-        "Manifest error:",
-        error
-      );
-
-      res
-        .status(500)
-        .json({
-          error:
-            "Manifest unavailable"
-        });
-    }
-
-  }
-);
-
-
-// ======================================================
-// CATALOG
-// ======================================================
-
-app.get(
-  "/catalog/:type/:id.json",
-  (req, res) => {
-
-    try {
-
-      const type =
-        req.params.type;
-
-
-      const search =
-        String(
-          req.query.search || ""
-        ).trim();
-
-
-      const skip =
-        Math.max(
-          0,
-          Number(
-            req.query.skip || 0
-          )
-        );
-
-
-      const limit =
-        100;
-
-
-      let rows;
-
-
-      // --------------------------------------------------
-      // SEARCH
-      // --------------------------------------------------
-
-      if (search) {
-
-        rows =
-          db.prepare(`
-            SELECT *
-            FROM media
-
-            WHERE type = ?
-
-              AND (
-                title LIKE ?
-                OR filename LIKE ?
-                OR caption LIKE ?
-                OR tpdb_title LIKE ?
-                OR tpdb_studio LIKE ?
-              )
-
-            ORDER BY id DESC
-
-            LIMIT ?
-
-            OFFSET ?
-          `).all(
-
-            type,
-
-            `%${search}%`,
-            `%${search}%`,
-            `%${search}%`,
-            `%${search}%`,
-            `%${search}%`,
-
-            limit,
-
-            skip
-          );
-
-
-      } else {
-
-        // ------------------------------------------------
-        // NORMAL CATALOG
-        // ------------------------------------------------
-
-        rows =
-          db.prepare(`
-            SELECT *
-            FROM media
-
-            WHERE type = ?
-
-            ORDER BY id DESC
-
-            LIMIT ?
-
-            OFFSET ?
-          `).all(
-
-            type,
-
-            limit,
-
-            skip
-          );
-      }
-
-
-      const baseUrl =
-        getBaseUrl(req);
-
-
-      const metas =
-        rows.map(
-          row =>
-            makeMeta(
-              row,
-              baseUrl
-            )
-        );
-
-
-      res.json({
-        metas
-      });
-
-
-    } catch (error) {
-
-      console.error(
-        "Catalog error:",
-        error
-      );
-
-
-      res
-        .status(500)
-        .json({
-          metas: []
-        });
-    }
-
-  }
-);
-
-
-// ======================================================
-// META
-// ======================================================
-
-app.get(
-  "/meta/:type/:id.json",
-  (req, res) => {
-
-    try {
-
-      const rawId =
-        String(
-          req.params.id
-        );
-
-
-      const numericId =
-        rawId.startsWith("tg:")
-          ? Number(
-              rawId.substring(3)
-            )
-          : Number(rawId);
-
-
-      if (!numericId) {
-
-        return res
-          .status(400)
-          .json({
-            error:
-              "Invalid media ID"
-          });
-      }
-
-
-      const row =
-        db.prepare(`
-          SELECT *
-          FROM media
-          WHERE id = ?
-        `).get(
-          numericId
-        );
-
-
-      if (!row) {
-
-        return res
-          .status(404)
-          .json({
-            error:
-              "Media not found"
-          });
-      }
-
-
-      const baseUrl =
-        getBaseUrl(req);
-
-
-      const meta =
-        makeMeta(
-          row,
-          baseUrl
-        );
-
-
-      console.log(
-        `Meta requested: ${row.id} | ${meta.name}`
-      );
-
-
-      res.json({
-        meta
-      });
-
-
-    } catch (error) {
-
-      console.error(
-        "Meta error:",
-        error
-      );
-
-
-      res
-        .status(500)
-        .json({
-          error:
-            "Meta unavailable"
-        });
-    }
-
-  }
-);
-
-
-// ======================================================
-// STREAM METADATA
-// ======================================================
-
-app.get(
-  "/stream/:type/:id.json",
-  async (req, res) => {
-
-    try {
-
-      const rawId =
-        String(
-          req.params.id
-        );
-
-
-      const numericId =
-        rawId.startsWith("tg:")
-          ? Number(
-              rawId.substring(3)
-            )
-          : Number(rawId);
-
-
-      if (!numericId) {
-
-        return res
-          .status(400)
-          .json({
-            streams: []
-          });
-      }
-
-
-      const row =
-        db.prepare(`
-          SELECT *
-          FROM media
-          WHERE id = ?
-        `).get(
-          numericId
-        );
-
-
-      if (!row) {
-
-        return res
-          .status(404)
-          .json({
-            streams: []
-          });
-      }
-
-
-      const baseUrl =
-        getBaseUrl(req);
-
-
-      const displayTitle =
-        row.tpdb_title ||
-        row.title ||
-        row.filename ||
-        "Telegram";
-
-
-      res.json({
-
-        streams: [
-
-          {
-
-            name:
-              displayTitle,
-
-            title:
-              row.filename ||
-              displayTitle,
-
-            url:
-              `${baseUrl}/file/${row.message_id}`,
-
-            behaviorHints: {
-              notWebReady: true
-            }
-
-          }
-
-        ]
-
-      });
-
-
-    } catch (error) {
-
-      console.error(
-        "Stream metadata error:",
-        error
-      );
-
-
-      res
-        .status(500)
-        .json({
-          streams: []
-        });
-    }
-
-  }
-);
-
-
-// ======================================================
-// TELEGRAM FILE STREAM
-// ======================================================
-
-app.get(
-  "/file/:messageId",
-  async (req, res) => {
-
-    try {
-
-      const messageId =
-        Number(
-          req.params.messageId
-        );
-
-
-      if (!messageId) {
-
-        return res
-          .status(400)
-          .send(
-            "Invalid message ID"
-          );
-      }
-
-
-      const message =
-        await getMessage(
-          messageId
-        );
-
-
-      if (!message) {
-
-        return res
-          .status(404)
-          .send(
-            "Telegram message not found"
-          );
-      }
-
-
-      const document =
-        message?.media?.document;
-
-
-      if (!document) {
-
-        return res
-          .status(404)
-          .send(
-            "Telegram document not found"
-          );
-      }
-
-
-      const fileSize =
-        Number(
-          document.size || 0
-        );
-
-
-      if (!fileSize) {
-
-        return res
-          .status(500)
-          .send(
-            "File size unavailable"
-          );
-      }
-
-
-      const mime =
-        document.mimeType ||
-        "application/octet-stream";
-
-
-      const range =
-        req.headers.range;
-
-
-      // ==================================================
-      // FULL FILE
-      // ==================================================
-
-      if (!range) {
-
-        res.status(200);
-
-
-        res.setHeader(
-          "Content-Type",
-          mime
-        );
-
-
-        res.setHeader(
-          "Content-Length",
-          fileSize
-        );
-
-
-        res.setHeader(
-          "Accept-Ranges",
-          "bytes"
-        );
-
-
-        res.setHeader(
-          "Cache-Control",
-          "no-cache"
-        );
-
-
-        const iterator =
-          await streamMessage(
-            message,
-            0,
-            fileSize - 1
-          );
-
-
-        try {
-
-          for await (
-            const chunk
-            of iterator
-          ) {
-
-            if (
-              !res.write(
-                chunk
-              )
-            ) {
-
-              await new Promise(
-                resolve =>
-                  res.once(
-                    "drain",
-                    resolve
-                  )
-              );
-            }
-          }
-
-
-          res.end();
-
-
-        } catch (error) {
-
-          console.error(
-            "Full stream error:",
-            error
-          );
-
-
-          res.destroy();
-        }
-
-
-        return;
-      }
-
-
-      // ==================================================
-      // RANGE REQUEST
-      // ==================================================
-
-      const match =
-        range.match(
-          /bytes=(\d*)-(\d*)/
-        );
-
-
-      if (!match) {
-
-        return res
-          .status(416)
-          .set(
-            "Content-Range",
-            `bytes */${fileSize}`
-          )
-          .end();
-      }
-
-
-      let start =
-        match[1]
-          ? Number(match[1])
-          : null;
-
-
-      let end =
-        match[2]
-          ? Number(match[2])
-          : null;
-
-
-      // --------------------------------------------------
-      // Suffix range
-      // --------------------------------------------------
-
-      if (
-        start === null &&
-        end !== null
-      ) {
-
-        const suffix =
-          end;
-
-
-        start =
-          Math.max(
-            0,
-            fileSize - suffix
-          );
-
-
-        end =
-          fileSize - 1;
-      }
-
-
-      // --------------------------------------------------
-      // Open-ended range
-      // --------------------------------------------------
-
-      if (
-        start !== null &&
-        end === null
-      ) {
-
-        end =
-          fileSize - 1;
-      }
-
-
-      // --------------------------------------------------
-      // Invalid range
-      // --------------------------------------------------
-
-      if (
-
-        start === null ||
-
-        end === null ||
-
-        start < 0 ||
-
-        end < start ||
-
-        start >= fileSize
-
-      ) {
-
-        return res
-          .status(416)
-          .set(
-            "Content-Range",
-            `bytes */${fileSize}`
-          )
-          .end();
-      }
-
-
-      end =
-        Math.min(
-          end,
-          fileSize - 1
-        );
-
-
-      const contentLength =
-        end - start + 1;
-
-
-      // --------------------------------------------------
-      // Response headers
-      // --------------------------------------------------
-
-      res.status(206);
-
-
-      res.setHeader(
-        "Content-Type",
-        mime
-      );
-
-
-      res.setHeader(
-        "Content-Length",
-        contentLength
-      );
-
-
-      res.setHeader(
-        "Content-Range",
-        `bytes ${start}-${end}/${fileSize}`
-      );
-
-
-      res.setHeader(
-        "Accept-Ranges",
-        "bytes"
-      );
-
-
-      res.setHeader(
-        "Cache-Control",
-        "no-cache"
-      );
-
-
-      console.log(
-        `HTTP range: ${start}-${end}/${fileSize}`
-      );
-
-
-      const iterator =
-        await streamMessage(
-          message,
-          start,
-          end
-        );
-
-
-      try {
-
-        for await (
-          const chunk
-          of iterator
-        ) {
-
-          if (
-            !res.write(
-              chunk
-            )
-          ) {
-
-            await new Promise(
-              resolve =>
-                res.once(
-                  "drain",
-                  resolve
-                )
-            );
-          }
-        }
-
-
-        res.end();
-
-
-      } catch (error) {
-
-        console.error(
-          "Range stream error:",
-          error
-        );
-
-
-        res.destroy();
-      }
-
-
-    } catch (error) {
-
-      console.error(
-        "File endpoint error:",
-        error
-      );
-
-
-      if (
-        !res.headersSent
-      ) {
-
-        res
-          .status(500)
-          .send(
-            "File streaming failed"
-          );
-
-      } else {
-
-        res.destroy();
-      }
-    }
-
-  }
-);
-
-
-// ======================================================
-// PERFORMER NAME
-// ======================================================
-
-function getPerformerName(
-  performer
-) {
-
-  if (
-    typeof performer === "string"
-  ) {
-    return safeString(
-      performer
-    );
-  }
-
-
-  if (!performer) {
-    return "";
-  }
-
-
-  return safeString(
-
-    performer.name ||
-
-    performer.display_name ||
-
-    performer.displayName ||
-
-    performer.title ||
-
-    performer.full_name ||
-
-    performer.fullName ||
-
-    ""
-
-  );
 }
 
 
-// ======================================================
-// PERFORMER PHOTO
-// ======================================================
+function makeTelegramId(id) {
+  return `tg:${id}`;
+}
 
-function getPerformerPhoto(
-  performer
-) {
 
-  if (
-    !performer ||
-    typeof performer === "string"
-  ) {
+function getPosterUrl(row) {
+  if (!row) {
     return null;
   }
 
-
-  // ----------------------------------------------------
-  // Direct fields
-  // ----------------------------------------------------
-
-  let photo =
-
-    performer.photo ||
-
-    performer.image ||
-
-    performer.avatar ||
-
-    performer.avatar_url ||
-
-    performer.avatarUrl ||
-
-    performer.image_url ||
-
-    performer.imageUrl ||
-
-    performer.profile_image ||
-
-    performer.profileImage ||
-
-    performer.thumbnail ||
-
-    performer.poster ||
-
-    null;
-
-
-  // ----------------------------------------------------
-  // Nested image object
-  // ----------------------------------------------------
-
-  if (
-    photo &&
-    typeof photo === "object"
-  ) {
-
-    photo =
-
-      photo.url ||
-
-      photo.src ||
-
-      photo.href ||
-
-      photo.image ||
-
-      null;
-  }
-
-
-  // ----------------------------------------------------
-  // Nested photo object
-  // ----------------------------------------------------
-
-  if (
-    !photo &&
-    performer.photo &&
-    typeof performer.photo === "object"
-  ) {
-
-    photo =
-
-      performer.photo.url ||
-
-      performer.photo.src ||
-
-      performer.photo.href ||
-
-      null;
-  }
-
-
-  // ----------------------------------------------------
-  // Nested image object
-  // ----------------------------------------------------
-
-  if (
-    !photo &&
-    performer.image &&
-    typeof performer.image === "object"
-  ) {
-
-    photo =
-
-      performer.image.url ||
-
-      performer.image.src ||
-
-      performer.image.href ||
-
-      null;
-  }
-
-
-  if (!photo) {
+  if (!row.tpdb_poster) {
     return null;
   }
 
-
-  return safeString(
-    photo
-  );
+  /*
+   * IMPORTANT:
+   * Do not directly use TPDB image URL.
+   * Route artwork through our addon so Nuvio receives
+   * the same image URL in catalog and detail metadata.
+   */
+  return `${BASE_URL}/poster/${row.id}`;
 }
 
 
-// ======================================================
-// PERFORMER CHARACTER
-// ======================================================
-
-function getPerformerCharacter(
-  performer
-) {
-
-  if (
-    !performer ||
-    typeof performer === "string"
-  ) {
-    return "";
+function getBackgroundUrl(row) {
+  if (!row) {
+    return null;
   }
 
+  if (row.tpdb_background) {
+    return `${BASE_URL}/background/${row.id}`;
+  }
 
-  return safeString(
+  if (row.tpdb_poster) {
+    return `${BASE_URL}/poster/${row.id}`;
+  }
 
-    performer.character ||
+  return null;
+}
 
-    performer.role ||
 
-    performer.alias ||
+/* =========================================================
+   CAST HELPERS
+   ========================================================= */
 
-    ""
+function getPerformerName(item) {
+  if (!item) {
+    return null;
+  }
 
+  if (typeof item === "string") {
+    return item.trim() || null;
+  }
+
+  return (
+    item.name ||
+    item.title ||
+    item.full_name ||
+    item.performer ||
+    item.actor ||
+    null
   );
 }
 
 
-// ======================================================
-// BUILD NUVIO CAST
-// ======================================================
-//
-// Nuvio structured cast:
-//
-// app_extras: {
-//   cast: [
-//     {
-//       name: "...",
-//       character: "...",
-//       photo: "..."
-//     }
-//   ]
-// }
-//
-// This is supported by Nuvio's metadata pipeline.
-// ------------------------------------------------------
+function getPerformerPhoto(item) {
+  if (!item || typeof item === "string") {
+    return null;
+  }
 
-function buildNuvioCast(
-  performers
-) {
+  return (
+    item.photo ||
+    item.image ||
+    item.avatar ||
+    item.thumbnail ||
+    item.poster ||
+    null
+  );
+}
 
-  if (
-    !Array.isArray(
-      performers
-    )
-  ) {
+
+function getPerformerCharacter(item) {
+  if (!item || typeof item === "string") {
+    return null;
+  }
+
+  return (
+    item.character ||
+    item.role ||
+    null
+  );
+}
+
+
+function parsePerformers(value) {
+  if (!value) {
     return [];
   }
 
+  if (Array.isArray(value)) {
+    return value;
+  }
 
-  const result = [];
+  try {
+    const parsed = JSON.parse(value);
+
+    if (Array.isArray(parsed)) {
+      return parsed;
+    }
+
+    return [];
+  } catch {
+    return [];
+  }
+}
 
 
-  for (
-    const performer
-    of performers
-  ) {
+function buildNuvioCast(row) {
+  const performers = parsePerformers(
+    row.tpdb_performers
+  );
 
-    const name =
-      getPerformerName(
-        performer
-      );
+  const cast = [];
 
+  for (const performer of performers) {
+    const name = getPerformerName(performer);
 
     if (!name) {
       continue;
     }
 
-
-    const photo =
-      getPerformerPhoto(
-        performer
-      );
-
-
-    const character =
-      getPerformerCharacter(
-        performer
-      );
-
-
     const actor = {
       name
     };
 
+    const character =
+      getPerformerCharacter(performer);
+
+    const photo =
+      getPerformerPhoto(performer);
 
     if (character) {
-
-      actor.character =
-        character;
+      actor.character = character;
     }
-
 
     if (photo) {
-
-      actor.photo =
-        photo;
+      actor.photo = photo;
     }
 
-
-    result.push(
-      actor
-    );
+    cast.push(actor);
   }
 
-
-  return result;
+  return cast;
 }
 
 
-// ======================================================
-// BUILD GENRES
-// ======================================================
+/* =========================================================
+   GENRE / TAG HELPERS
+   ========================================================= */
 
-function buildGenres(
-  tags
-) {
-
-  if (
-    !Array.isArray(tags)
-  ) {
+function parseJsonArray(value) {
+  if (!value) {
     return [];
   }
 
+  if (Array.isArray(value)) {
+    return value;
+  }
+
+  try {
+    const parsed = JSON.parse(value);
+
+    if (Array.isArray(parsed)) {
+      return parsed;
+    }
+
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+
+function buildGenres(row) {
+  const tags = parseJsonArray(
+    row.tpdb_tags
+  );
 
   return tags
-
-    .map(
-      tag => {
-
-        if (
-          typeof tag === "string"
-        ) {
-          return tag.trim();
-        }
-
-
-        return safeString(
-
-          tag?.name ||
-
-          tag?.title ||
-
-          tag?.label ||
-
-          ""
-
-        );
+    .map((tag) => {
+      if (typeof tag === "string") {
+        return tag.trim();
       }
-    )
 
-    .filter(Boolean)
+      if (tag && typeof tag === "object") {
+        return (
+          tag.name ||
+          tag.title ||
+          ""
+        ).trim();
+      }
 
-    // Remove duplicates
-
-    .filter(
-      (value, index, array) =>
-        array.indexOf(value) ===
-        index
-    );
+      return "";
+    })
+    .filter(Boolean);
 }
 
 
-// ======================================================
-// BUILD ACTOR LINKS
-// ======================================================
+function buildActorLinks(row) {
+  const performers = parsePerformers(
+    row.tpdb_performers
+  );
 
-function buildActorLinks(
-  cast
-) {
+  return performers
+    .map((performer) => {
+      const name =
+        getPerformerName(performer);
 
-  if (
-    !Array.isArray(cast)
-  ) {
-    return [];
-  }
+      if (!name) {
+        return null;
+      }
 
+      const photo =
+        getPerformerPhoto(performer);
 
-  return cast
-    .map(
-      actor => ({
-
-        name:
-          actor.name,
-
-        category:
-          "actor",
-
-        // Internal Nuvio/Stremio
-        // metadata link.
-        //
-        // Keep this as a search-style
-        // URL rather than inventing an
-        // external actor page.
-
-        url:
-          `https://www.google.com/search?q=${encodeURIComponent(actor.name)}`
-
-      })
-    );
+      return {
+        name,
+        ...(photo ? { photo } : {})
+      };
+    })
+    .filter(Boolean);
 }
 
 
-// ======================================================
-// MAKE META
-// ======================================================
+/* =========================================================
+   META BUILDER
+   ========================================================= */
 
-function makeMeta(
-  row,
-  baseUrl
-) {
+function makeMeta(row) {
+  const id = makeTelegramId(row.id);
 
-  // ----------------------------------------------------
-  // TPDB performers
-  // ----------------------------------------------------
+  const title =
+    cleanText(row.tpdb_title) ||
+    cleanText(row.title) ||
+    cleanText(row.filename) ||
+    "Untitled";
 
-  const performers =
-    parseJson(
-      row.tpdb_performers,
-      []
+  const year =
+    safeNumber(
+      row.tpdb_year ||
+      row.year ||
+      0,
+      0
     );
 
+  const description =
+    cleanText(row.tpdb_description) ||
+    cleanText(row.caption) ||
+    "";
 
-  // ----------------------------------------------------
-  // TPDB tags
-  // ----------------------------------------------------
+  const posterUrl =
+    getPosterUrl(row);
 
-  const tags =
-    parseJson(
-      row.tpdb_tags,
-      []
-    );
-
-
-  // ----------------------------------------------------
-  // Cast
-  // ----------------------------------------------------
+  const backgroundUrl =
+    getBackgroundUrl(row);
 
   const cast =
-    buildNuvioCast(
-      performers
-    );
-
-
-  // ----------------------------------------------------
-  // Standard Stremio cast
-  //
-  // Standard cast is an array of
-  // names, not objects.
-  // ----------------------------------------------------
-
-  const simpleCast =
-    cast.map(
-      actor =>
-        actor.name
-    );
-
-
-  // ----------------------------------------------------
-  // Genres
-  // ----------------------------------------------------
+    buildNuvioCast(row);
 
   const genres =
-    buildGenres(
-      tags
-    );
+    buildGenres(row);
 
+  const actorLinks =
+    buildActorLinks(row);
 
-  // ----------------------------------------------------
-  // Type
-  // ----------------------------------------------------
+  const studio =
+    cleanText(row.tpdb_studio);
 
   const type =
     row.type === "series"
@@ -1374,334 +429,869 @@ function makeMeta(
       : "movie";
 
 
-  // ----------------------------------------------------
-  // Display title
-  // ----------------------------------------------------
-
-  const displayTitle =
-
-    row.tpdb_title ||
-
-    row.title ||
-
-    row.filename ||
-
-    `Telegram ${row.message_id}`;
-
-
-  // ----------------------------------------------------
-  // Description
-  // ----------------------------------------------------
-
-  const description =
-
-    row.tpdb_description ||
-
-    row.caption ||
-
-    row.filename ||
-
-    "";
-
-
-  // ----------------------------------------------------
-  // Year
-  // ----------------------------------------------------
-
-  const year =
-
-    row.tpdb_year ||
-
-    row.year ||
-
-    undefined;
-
-
-  // ----------------------------------------------------
-  // Studio
-  // ----------------------------------------------------
-
-  const studio =
-    safeString(
-      row.tpdb_studio
-    );
-
-
-  // ----------------------------------------------------
-  // Stream URL
-  // ----------------------------------------------------
-
-  const fileUrl =
-    `${baseUrl}/file/${row.message_id}`;
-
-
-  // ----------------------------------------------------
-  // Base meta
-  // ----------------------------------------------------
-
   const meta = {
-
-    id:
-      `tg:${row.id}`,
-
-
+    id,
     type,
-
-
-    name:
-      displayTitle,
-
+    name: title,
 
     description,
 
-
-    year,
-
-
-    releaseInfo:
-      year
-        ? String(year)
-        : undefined,
-
-
-    genres:
-      genres.length
-        ? genres
-        : undefined,
-
-
-    // Standard Stremio format
-
-    cast:
-      simpleCast.length
-        ? simpleCast
-        : undefined,
-
-
-    links:
-      buildActorLinks(
-        cast
-      ),
-
-
-    behaviorHints: {
-
-      defaultVideoId:
-        `tg:${row.id}`,
-
-      adult:
-        true
-
-    },
-
-
-    streams: [
-
-      {
-
-        name:
-          displayTitle,
-
-        title:
-          row.filename ||
-          displayTitle,
-
-        url:
-          fileUrl,
-
-        behaviorHints: {
-
-          notWebReady:
-            true
-
-        }
-
-      }
-
-    ]
-
+    posterShape: "poster"
   };
 
 
-  // ====================================================
-  // NUVIO EXTENDED CAST
-  // ====================================================
+  /* =======================================================
+     ARTWORK
+     ======================================================= */
 
-  if (
-    cast.length ||
-    studio
-  ) {
+  if (posterUrl) {
+    meta.poster = posterUrl;
 
-    meta.app_extras = {
+    /*
+     * Some clients use banner instead of poster
+     * for the detail hero image.
+     */
+    meta.banner = posterUrl;
+  }
 
-      ...(cast.length
-        ? {
-            cast
-          }
-        : {}),
-
-
-      ...(studio
-        ? {
-            studio
-          }
-        : {})
-
-    };
+  if (backgroundUrl) {
+    meta.background = backgroundUrl;
   }
 
 
-  // ====================================================
-  // POSTER
-  // ====================================================
+  /* =======================================================
+     YEAR
+     ======================================================= */
 
-  if (
-    row.tpdb_poster
-  ) {
-
-    meta.poster =
-      row.tpdb_poster;
-
-    meta.posterShape =
-      "poster";
+  if (year > 0) {
+    meta.year = year;
   }
 
 
-  // ====================================================
-  // BACKGROUND
-  // ====================================================
+  /* =======================================================
+     GENRES
+     ======================================================= */
 
-  if (
-    row.tpdb_background
-  ) {
-
-    meta.background =
-      row.tpdb_background;
-
-  } else if (
-    row.tpdb_poster
-  ) {
-
-    meta.background =
-      row.tpdb_poster;
+  if (genres.length) {
+    meta.genre = genres;
   }
 
 
-  // ====================================================
-  // STUDIO LINK
-  // ====================================================
+  /* =======================================================
+     CAST
+     ======================================================= */
 
-  if (studio) {
-
-    meta.links.push({
-
-      name:
-        studio,
-
-      category:
-        "studio",
-
-      url:
-        `https://www.google.com/search?q=${encodeURIComponent(studio)}`
-
-    });
+  if (cast.length) {
+    /*
+     * Standard Stremio/Nuvio cast field.
+     */
+    meta.cast = cast.map(
+      (actor) => actor.name
+    );
   }
 
 
-  // ====================================================
-  // RELEASE DATE
-  // ====================================================
+  /* =======================================================
+     EXTRA DATA
+     ======================================================= */
 
-  if (
-    row.tpdb_year
-  ) {
+  meta.app_extras = {
+    ...(posterUrl
+      ? {
+          poster: posterUrl
+        }
+      : {}),
 
-    meta.released =
-      `${row.tpdb_year}-01-01T00:00:00.000Z`;
-  }
+    ...(backgroundUrl
+      ? {
+          background: backgroundUrl
+        }
+      : {}),
+
+    ...(cast.length
+      ? {
+          cast
+        }
+      : {}),
+
+    ...(actorLinks.length
+      ? {
+          actors: actorLinks
+        }
+      : {}),
+
+    ...(studio
+      ? {
+          studio
+        }
+      : {})
+  };
 
 
-  // ====================================================
-  // DEBUG LOG
-  // ====================================================
-
-  console.log(
-    [
-      `Meta: ${row.id}`,
-
-      `title="${displayTitle}"`,
-
-      `poster=${row.tpdb_poster ? "yes" : "no"}`,
-
-      `background=${row.tpdb_background ? "yes" : "no"}`,
-
-      `cast=${cast.length}`,
-
-      `genres=${genres.length}`,
-
-      `studio=${studio || "none"}`
-    ].join(" | ")
-  );
-
-
-  // ----------------------------------------------------
-  // Remove undefined recursively
-  // ----------------------------------------------------
-
-  return JSON.parse(
-    JSON.stringify(
-      meta
-    )
-  );
+  return meta;
 }
 
 
-// ======================================================
-// INITIAL INDEX
-// ======================================================
+/* =========================================================
+   HEALTH
+   ========================================================= */
 
-async function ensureIndexed() {
-
-  try {
-
-    console.log(
-      "Checking Telegram index..."
-    );
-
-
-    await indexTelegram();
+app.get("/", (req, res) => {
+  res.json({
+    ok: true,
+    name: MANIFEST.name,
+    version: MANIFEST.version
+  });
+});
 
 
-    console.log(
-      "Telegram index check completed."
-    );
+app.get("/health", (req, res) => {
+  res.json({
+    ok: true
+  });
+});
 
 
-  } catch (error) {
+/* =========================================================
+   MANIFEST
+   ========================================================= */
 
-    console.error(
-      "Initial indexing failed:",
-      error
-    );
+app.get("/manifest.json", (req, res) => {
+  res.json(MANIFEST);
+});
+
+
+/* =========================================================
+   CATALOG
+   ========================================================= */
+
+app.get(
+  "/catalog/:type/:id.json",
+  (req, res) => {
+    try {
+      const type =
+        req.params.type;
+
+      const catalogId =
+        req.params.id;
+
+      const search =
+        cleanText(req.query.search);
+
+      const skip =
+        Math.max(
+          0,
+          safeNumber(
+            req.query.skip,
+            0
+          )
+        );
+
+
+      if (
+        catalogId !== "happy-movies" &&
+        catalogId !== "happy-series"
+      ) {
+        return res.json({
+          metas: []
+        });
+      }
+
+
+      const requestedType =
+        catalogId === "happy-series"
+          ? "series"
+          : "movie";
+
+
+      const db = getDb();
+
+      let rows;
+
+
+      if (search) {
+        const searchTerm =
+          `%${search}%`;
+
+        rows = db
+          .prepare(
+            `
+            SELECT *
+            FROM media
+            WHERE type = ?
+              AND (
+                title LIKE ?
+                OR filename LIKE ?
+                OR tpdb_title LIKE ?
+                OR tpdb_description LIKE ?
+              )
+            ORDER BY
+              COALESCE(
+                year,
+                tpdb_year,
+                0
+              ) DESC,
+              id DESC
+            LIMIT 100 OFFSET ?
+            `
+          )
+          .all(
+            requestedType,
+            searchTerm,
+            searchTerm,
+            searchTerm,
+            searchTerm,
+            skip
+          );
+      } else {
+        rows = db
+          .prepare(
+            `
+            SELECT *
+            FROM media
+            WHERE type = ?
+            ORDER BY
+              id DESC
+            LIMIT 100 OFFSET ?
+            `
+          )
+          .all(
+            requestedType,
+            skip
+          );
+      }
+
+
+      const metas =
+        rows.map((row) => {
+          const meta =
+            makeMeta(row);
+
+          /*
+           * Catalog cards sometimes need artwork
+           * directly from the catalog object.
+           */
+          return {
+            id: meta.id,
+            type: meta.type,
+            name: meta.name,
+
+            ...(meta.poster
+              ? {
+                  poster: meta.poster
+                }
+              : {}),
+
+            ...(meta.background
+              ? {
+                  background:
+                    meta.background
+                }
+              : {}),
+
+            ...(meta.year
+              ? {
+                  year: meta.year
+                }
+              : {}),
+
+            ...(meta.genre
+              ? {
+                  genre: meta.genre
+                }
+              : {})
+          };
+        });
+
+
+      res.json({
+        metas
+      });
+
+    } catch (error) {
+      console.error(
+        "Catalog error:",
+        error
+      );
+
+      res.status(500).json({
+        metas: [],
+        error: "Catalog error"
+      });
+    }
   }
-}
+);
 
 
-// ======================================================
-// START SERVER
-// ======================================================
+/* =========================================================
+   META
+   ========================================================= */
+
+app.get(
+  "/meta/:type/:id.json",
+  (req, res) => {
+    try {
+      const rawId =
+        decodeId(req.params.id);
+
+      let id = rawId;
+
+      if (id.startsWith("tg:")) {
+        id = id.slice(3);
+      }
+
+      const row =
+        getMediaById(
+          Number(id)
+        );
+
+
+      if (!row) {
+        return res.status(404).json({
+          meta: null
+        });
+      }
+
+
+      const meta =
+        makeMeta(row);
+
+
+      console.log(
+        "META:",
+        meta.id,
+        "poster:",
+        meta.poster || null,
+        "background:",
+        meta.background || null,
+        "cast:",
+        meta.cast?.length || 0
+      );
+
+
+      res.json({
+        meta
+      });
+
+    } catch (error) {
+      console.error(
+        "Meta error:",
+        error
+      );
+
+      res.status(500).json({
+        meta: null,
+        error: "Meta error"
+      });
+    }
+  }
+);
+
+
+/* =========================================================
+   POSTER PROXY
+   ========================================================= */
+
+app.get(
+  "/poster/:id",
+  async (req, res) => {
+    try {
+      const id =
+        Number(
+          decodeId(req.params.id)
+        );
+
+      const row =
+        getMediaById(id);
+
+
+      if (!row) {
+        return res.status(404).end();
+      }
+
+
+      if (!row.tpdb_poster) {
+        return res.status(404).end();
+      }
+
+
+      const response =
+        await fetch(
+          row.tpdb_poster,
+          {
+            headers: {
+              "User-Agent":
+                "Happy-Telegram-Addon/1.0"
+            }
+          }
+        );
+
+
+      if (!response.ok) {
+        console.error(
+          "Poster fetch failed:",
+          response.status,
+          row.tpdb_poster
+        );
+
+        return res
+          .status(response.status)
+          .end();
+      }
+
+
+      const contentType =
+        response.headers.get(
+          "content-type"
+        ) ||
+        "image/jpeg";
+
+
+      const buffer =
+        Buffer.from(
+          await response.arrayBuffer()
+        );
+
+
+      res.setHeader(
+        "Content-Type",
+        contentType
+      );
+
+      res.setHeader(
+        "Content-Length",
+        buffer.length
+      );
+
+      res.setHeader(
+        "Cache-Control",
+        "public, max-age=86400"
+      );
+
+      res.setHeader(
+        "Access-Control-Allow-Origin",
+        "*"
+      );
+
+      res.end(buffer);
+
+    } catch (error) {
+      console.error(
+        "Poster proxy error:",
+        error
+      );
+
+      res.status(500).end();
+    }
+  }
+);
+
+
+/* =========================================================
+   BACKGROUND PROXY
+   ========================================================= */
+
+app.get(
+  "/background/:id",
+  async (req, res) => {
+    try {
+      const id =
+        Number(
+          decodeId(req.params.id)
+        );
+
+      const row =
+        getMediaById(id);
+
+
+      if (!row) {
+        return res.status(404).end();
+      }
+
+
+      const imageUrl =
+        row.tpdb_background ||
+        row.tpdb_poster;
+
+
+      if (!imageUrl) {
+        return res.status(404).end();
+      }
+
+
+      const response =
+        await fetch(
+          imageUrl,
+          {
+            headers: {
+              "User-Agent":
+                "Happy-Telegram-Addon/1.0"
+            }
+          }
+        );
+
+
+      if (!response.ok) {
+        return res
+          .status(response.status)
+          .end();
+      }
+
+
+      const contentType =
+        response.headers.get(
+          "content-type"
+        ) ||
+        "image/jpeg";
+
+
+      const buffer =
+        Buffer.from(
+          await response.arrayBuffer()
+        );
+
+
+      res.setHeader(
+        "Content-Type",
+        contentType
+      );
+
+      res.setHeader(
+        "Content-Length",
+        buffer.length
+      );
+
+      res.setHeader(
+        "Cache-Control",
+        "public, max-age=86400"
+      );
+
+      res.setHeader(
+        "Access-Control-Allow-Origin",
+        "*"
+      );
+
+      res.end(buffer);
+
+    } catch (error) {
+      console.error(
+        "Background proxy error:",
+        error
+      );
+
+      res.status(500).end();
+    }
+  }
+);
+
+
+/* =========================================================
+   STREAM
+   ========================================================= */
+
+app.get(
+  "/stream/:type/:id.json",
+  (req, res) => {
+    try {
+      const rawId =
+        decodeId(req.params.id);
+
+      let id =
+        rawId;
+
+      if (id.startsWith("tg:")) {
+        id = id.slice(3);
+      }
+
+
+      const row =
+        getMediaById(
+          Number(id)
+        );
+
+
+      if (!row) {
+        return res.json({
+          streams: []
+        });
+      }
+
+
+      const title =
+        cleanText(
+          row.tpdb_title
+        ) ||
+        cleanText(
+          row.title
+        ) ||
+        cleanText(
+          row.filename
+        ) ||
+        "Telegram Video";
+
+
+      const streamUrl =
+        `${BASE_URL}/file/${row.message_id}`;
+
+
+      const stream = {
+        name: "Happy Telegram",
+
+        title,
+
+        url: streamUrl,
+
+        behaviorHints: {
+          notWebReady: true,
+
+          bingeGroup:
+            "happy-telegram",
+
+          videoSize:
+            safeNumber(
+              row.size,
+              undefined
+            )
+        }
+      };
+
+
+      res.json({
+        streams: [
+          stream
+        ]
+      });
+
+    } catch (error) {
+      console.error(
+        "Stream error:",
+        error
+      );
+
+      res.status(500).json({
+        streams: []
+      });
+    }
+  }
+);
+
+
+/* =========================================================
+   TELEGRAM FILE STREAM
+   ========================================================= */
+
+app.get(
+  "/file/:messageId",
+  async (req, res) => {
+    try {
+      const messageId =
+        Number(
+          req.params.messageId
+        );
+
+
+      if (
+        !Number.isFinite(
+          messageId
+        )
+      ) {
+        return res.status(400).end();
+      }
+
+
+      const row =
+        getMediaByMessageId(
+          messageId
+        );
+
+
+      if (!row) {
+        return res.status(404).end();
+      }
+
+
+      const totalSize =
+        safeNumber(
+          row.size,
+          0
+        );
+
+
+      if (
+        !totalSize ||
+        totalSize <= 0
+      ) {
+        return res.status(416).end();
+      }
+
+
+      const range =
+        req.headers.range;
+
+
+      let start = 0;
+      let end =
+        totalSize - 1;
+
+
+      if (range) {
+        const match =
+          range.match(
+            /bytes=(\d*)-(\d*)/
+          );
+
+
+        if (!match) {
+          return res
+            .status(416)
+            .set(
+              "Content-Range",
+              `bytes */${totalSize}`
+            )
+            .end();
+        }
+
+
+        if (match[1]) {
+          start =
+            Number(
+              match[1]
+            );
+        }
+
+
+        if (match[2]) {
+          end =
+            Number(
+              match[2]
+            );
+        } else {
+          end =
+            totalSize - 1;
+        }
+
+
+        if (
+          start < 0 ||
+          start >= totalSize ||
+          end < start
+        ) {
+          return res
+            .status(416)
+            .set(
+              "Content-Range",
+              `bytes */${totalSize}`
+            )
+            .end();
+        }
+
+
+        if (
+          end >= totalSize
+        ) {
+          end =
+            totalSize - 1;
+        }
+      }
+
+
+      const contentLength =
+        end - start + 1;
+
+
+      const mime =
+        row.mime ||
+        "video/mp4";
+
+
+      res.setHeader(
+        "Content-Type",
+        mime
+      );
+
+      res.setHeader(
+        "Accept-Ranges",
+        "bytes"
+      );
+
+      res.setHeader(
+        "Content-Length",
+        contentLength
+      );
+
+      res.setHeader(
+        "Cache-Control",
+        "no-cache"
+      );
+
+
+      if (range) {
+        res.status(206);
+
+        res.setHeader(
+          "Content-Range",
+          `bytes ${start}-${end}/${totalSize}`
+        );
+      }
+
+
+      /*
+       * streamMessage() is responsible for fetching
+       * aligned Telegram chunks.
+       */
+      const stream =
+        await streamMessage(
+          messageId,
+          start,
+          end
+        );
+
+
+      for await (
+        const chunk of stream
+      ) {
+        if (res.destroyed) {
+          break;
+        }
+
+        res.write(chunk);
+      }
+
+
+      if (!res.destroyed) {
+        res.end();
+      }
+
+    } catch (error) {
+      console.error(
+        "File streaming error:",
+        error
+      );
+
+      if (!res.headersSent) {
+        res.status(500).end();
+      } else {
+        res.destroy();
+      }
+    }
+  }
+);
+
+
+/* =========================================================
+   START SERVER
+   ========================================================= */
 
 app.listen(
   PORT,
   "0.0.0.0",
-  async () => {
-
+  () => {
     console.log(
       `Happy Telegram addon running on port ${PORT}`
     );
 
-
-    await ensureIndexed();
-
+    console.log(
+      `Base URL: ${BASE_URL}`
+    );
   }
 );
