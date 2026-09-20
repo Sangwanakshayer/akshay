@@ -412,6 +412,70 @@ app.get(
 );
 
 
+
+
+/* =========================================================
+   POSTER PROXY
+   ========================================================= */
+
+app.get(
+  "/poster/:id",
+  async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+
+      if (!Number.isFinite(id)) {
+        return res.status(400).end();
+      }
+
+      const row = db.prepare(`
+        SELECT tpdb_poster
+        FROM media
+        WHERE id = ?
+        LIMIT 1
+      `).get(id);
+
+      if (!row?.tpdb_poster) {
+        return res.status(404).end();
+      }
+
+      const response = await fetch(row.tpdb_poster, {
+        headers: {
+          "User-Agent": "Happy-Telegram-Addon/1.0"
+        }
+      });
+
+      if (!response.ok) {
+        return res.status(response.status).end();
+      }
+
+      const contentType =
+        response.headers.get("content-type") || "image/jpeg";
+
+      const buffer =
+        Buffer.from(await response.arrayBuffer());
+
+      res.setHeader("Content-Type", contentType);
+      res.setHeader("Content-Length", buffer.length);
+      res.setHeader(
+        "Cache-Control",
+        "public, max-age=86400"
+      );
+      res.setHeader(
+        "Access-Control-Allow-Origin",
+        "*"
+      );
+
+      res.end(buffer);
+
+    } catch (error) {
+      console.error("Poster proxy error:", error);
+      res.status(500).end();
+    }
+  }
+);
+
+
 // ======================================================
 // STREAM METADATA
 // ======================================================
@@ -1560,7 +1624,7 @@ function makeMeta(
   ) {
 
     meta.poster =
-      row.tpdb_poster;
+      `${baseUrl}/poster/${row.id}`;
 
     meta.posterShape =
       "poster";
@@ -1583,7 +1647,7 @@ function makeMeta(
   ) {
 
     meta.background =
-      row.tpdb_poster;
+      `${baseUrl}/poster/${row.id}`;
   }
 
 
