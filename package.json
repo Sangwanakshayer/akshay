@@ -18,6 +18,7 @@
     "express": "^5.1.0",
     "ffmpeg-static": "^5.2.0",
     "input": "^1.0.1",
-    "telegram": "^2.26.22"
+    "telegram": "^2.26.22",
+    "cors": "^2.8.5"
   }
 }
